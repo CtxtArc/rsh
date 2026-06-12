@@ -26,10 +26,11 @@ fn test_cd_and_pwd() {
 fn test_cd_non_existent_directory() {
     let mut cmd = Command::cargo_bin(env!("CARGO_PKG_NAME")).unwrap();
 
+    // Change .stdout() to .stderr() since we upgraded our error handling!
     cmd.write_stdin("cd /this_directory_does_not_exist\nexit 0\n")
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "cd: /this_directory_does_not_exist: No such file or directory\n",
+        .stderr(predicate::str::contains(
+            "cd: /this_directory_does_not_exist: No such file or directory",
         ));
 }

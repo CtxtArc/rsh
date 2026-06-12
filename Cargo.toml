@@ -6,6 +6,7 @@ edition = "2021"
 [dev-dependencies]
 assert_cmd = "2.0"
 predicates = "3.0"
+tempfile = "3.27.0"
 
 [dependencies]
 ctrlc = "3.5.2"

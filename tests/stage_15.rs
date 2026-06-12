@@ -4,10 +4,13 @@ use std::time::{Duration, Instant};
 
 #[test]
 fn test_background_process() {
-    // Get the path to your compiled binary
     let exe = env!("CARGO_BIN_EXE_rsh");
 
+    // 1. Create a fake home directory to prevent history file lock contention!
+    let fake_home = tempfile::tempdir().unwrap();
+
     let mut child = Command::new(exe)
+        .env("HOME", fake_home.path()) // 2. Override HOME for this process
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -16,17 +19,15 @@ fn test_background_process() {
     let mut stdin = child.stdin.take().unwrap();
     let start = Instant::now();
 
-    // Send the background command
+    // 3. Send the background command, redirecting BOTH stdout and stderr
     stdin
-        .write_all(b"sleep 2 > /dev/null &\necho unblocked\nexit 0\n")
+        .write_all(b"sleep 2 > /dev/null 2> /dev/null &\necho unblocked\nexit 0\n")
         .unwrap();
     drop(stdin);
 
-    // Read the output
     let output = child.wait_with_output().expect("Failed to read stdout");
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    // Verify output and timing
     assert!(stdout.contains("unblocked"));
     assert!(
         start.elapsed() < Duration::from_secs(1),

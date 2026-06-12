@@ -345,9 +345,15 @@ fn evaluate_tokens(tokens: &[String]) -> bool {
 }
 
 fn main() {
+    ctrlc::set_handler(move || {
+        println!();
+        print!("");
+        std::io::stdout().flush().unwrap();
+    })
+    .expect("Error setting Ctrl-C handler");
+
     let args: Vec<String> = std::env::args().collect();
     if args.len() >= 3 && args[1] == "-c" {
-        // If run with `-c "command"`, just execute that command and exit
         let tokens = tokenize(&args[2]);
         evaluate_tokens(&tokens);
         return;
@@ -358,7 +364,18 @@ fn main() {
         std::io::stdout().flush().unwrap();
 
         let mut input = String::new();
-        std::io::stdin().read_line(&mut input).unwrap();
+
+        match std::io::stdin().read_line(&mut input) {
+            Ok(0) => {
+                println!("exit");
+                break;
+            }
+            Ok(_) => {}
+            Err(_) => {
+                continue;
+            }
+        }
+
         let trimmed_input = input.trim();
 
         if trimmed_input.is_empty() {
@@ -369,7 +386,6 @@ fn main() {
         evaluate_tokens(&tokens);
     }
 }
-
 fn execute_single(expr: &Command) -> bool {
     let mut output: Box<dyn Write> = if let Some(file) = &expr.stdout_file {
         if expr.append_stdout {

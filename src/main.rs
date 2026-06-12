@@ -1,3 +1,5 @@
+use rustyline::error::ReadlineError;
+use rustyline::DefaultEditor;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
@@ -397,11 +399,14 @@ fn evaluate_tokens(tokens: &[String]) -> bool {
 }
 
 fn main() {
+    // Keep the signal trap so child processes (like `sleep`) die
+    // without killing the parent shell.
     ctrlc::set_handler(move || {
         println!();
     })
     .expect("Error setting Ctrl-C handler");
 
+    // Handle Subshell / Script execution (-c flag)
     let args: Vec<String> = std::env::args().collect();
     if args.len() >= 3 && args[1] == "-c" {
         let tokens = tokenize(&args[2]);
@@ -409,30 +414,53 @@ fn main() {
         return;
     }
 
-    loop {
-        print!("$ ");
-        std::io::stdout().flush().unwrap();
+    // --- UX UPGRADE: INITIALIZE READLINE ---
+    let mut rl = DefaultEditor::new().expect("Failed to create readline editor");
 
-        let mut input = String::new();
-        match std::io::stdin().read_line(&mut input) {
-            Ok(0) => {
+    // Determine where to save the history file (~/.rsh_history)
+    let home_dir = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+    let history_file = PathBuf::from(&home_dir).join(".rsh_history");
+
+    // Silently load existing history if it exists
+    let _ = rl.load_history(&history_file);
+
+    // --- INTERACTIVE REPL ---
+    loop {
+        // rustyline handles printing the prompt and reading the line
+        let readline = rl.readline("$ ");
+
+        match readline {
+            Ok(line) => {
+                let trimmed_input = line.trim();
+
+                if trimmed_input.is_empty() {
+                    continue;
+                }
+
+                let _ = rl.add_history_entry(trimmed_input);
+
+                let _ = rl.save_history(&history_file);
+
+                let tokens = tokenize(trimmed_input);
+                evaluate_tokens(&tokens);
+            }
+            Err(ReadlineError::Interrupted) => {
+                continue;
+            }
+            Err(ReadlineError::Eof) => {
                 println!("exit");
                 break;
             }
-            Ok(_) => {}
-            Err(_) => continue,
+            Err(err) => {
+                println!("Error: {:?}", err);
+                break;
+            }
         }
-
-        let trimmed_input = input.trim();
-        if trimmed_input.is_empty() {
-            continue;
-        }
-
-        let tokens = tokenize(trimmed_input);
-        evaluate_tokens(&tokens);
     }
-}
 
+    // Save the history to disk before the shell closes!
+    let _ = rl.save_history(&history_file);
+}
 fn execute_single(expr: &Command, background: bool) -> bool {
     let mut output: Box<dyn Write> = if let Some(file) = &expr.stdout_file {
         if expr.append_stdout {

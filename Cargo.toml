@@ -9,3 +9,4 @@ predicates = "3.0"
 
 [dependencies]
 ctrlc = "3.5.2"
+rustyline = "18.0.0"

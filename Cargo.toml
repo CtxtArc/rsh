@@ -1,0 +1,8 @@
+[package]
+name = "rsh"
+version = "0.1.0"
+edition = "2021"
+
+[dev-dependencies]
+assert_cmd = "2.0"
+predicates = "3.0"

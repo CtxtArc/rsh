@@ -1,8 +1,21 @@
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
+
+struct ShellState {
+    aliases: HashMap<String, String>,
+}
+
+impl ShellState {
+    fn new() -> Self {
+        ShellState {
+            aliases: HashMap::new(),
+        }
+    }
+}
 
 #[derive(Debug, PartialEq, Clone)]
 enum Operator {
@@ -24,6 +37,7 @@ enum Builtin {
     Pwd,
     Cd(String),
     Export(String, String),
+    Alias(Vec<String>),
 }
 
 impl Builtin {
@@ -56,6 +70,10 @@ impl Builtin {
                     }
                 }
                 None
+            }
+            "alias" => {
+                let alias_args = args.iter().map(|s| s.to_string()).collect();
+                Some(Builtin::Alias(alias_args))
             }
             _ => None,
         }
@@ -359,7 +377,7 @@ fn parse_pipeline_from_tokens(tokens: &[String]) -> Vec<Command> {
     commands
 }
 
-fn evaluate_tokens(tokens: &[String]) -> bool {
+fn evaluate_tokens(state: &mut ShellState, tokens: &[String]) -> bool {
     if tokens.is_empty() {
         return true;
     }
@@ -378,7 +396,7 @@ fn evaluate_tokens(tokens: &[String]) -> bool {
 
             for item in items {
                 std::env::set_var(var_name, expand_word(item));
-                last_status = evaluate_tokens(inner_commands);
+                last_status = evaluate_tokens(state, inner_commands);
             }
 
             return last_status;
@@ -412,9 +430,9 @@ fn evaluate_tokens(tokens: &[String]) -> bool {
         let is_background = group.next_op == Operator::Async;
 
         last_success = if group.pipeline.len() == 1 {
-            execute_single(&group.pipeline[0], is_background)
+            execute_single(state, &group.pipeline[0], is_background)
         } else {
-            execute_pipeline(&group.pipeline, is_background)
+            execute_pipeline(state, &group.pipeline, is_background)
         };
 
         match group.next_op {
@@ -429,6 +447,7 @@ fn evaluate_tokens(tokens: &[String]) -> bool {
 }
 
 fn main() {
+    let mut state = ShellState::new();
     // Keep the signal trap so child processes (like `sleep`) die
     // without killing the parent shell.
     ctrlc::set_handler(move || {
@@ -440,7 +459,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() >= 3 && args[1] == "-c" {
         let tokens = tokenize(&args[2]);
-        evaluate_tokens(&tokens);
+        evaluate_tokens(&mut state, &tokens);
         return;
     }
 
@@ -454,7 +473,6 @@ fn main() {
     // Silently load existing history if it exists
     let _ = rl.load_history(&history_file);
 
-    // --- INTERACTIVE REPL ---
     loop {
         // rustyline handles printing the prompt and reading the line
         let readline = rl.readline("$ ");
@@ -472,7 +490,7 @@ fn main() {
                 let _ = rl.save_history(&history_file);
 
                 let tokens = tokenize(trimmed_input);
-                evaluate_tokens(&tokens);
+                evaluate_tokens(&mut state, &tokens);
             }
             Err(ReadlineError::Interrupted) => {
                 continue;
@@ -488,10 +506,10 @@ fn main() {
         }
     }
 
-    // Save the history to disk before the shell closes!
     let _ = rl.save_history(&history_file);
 }
-fn execute_single(expr: &Command, background: bool) -> bool {
+
+fn execute_single(state: &mut ShellState, expr: &Command, background: bool) -> bool {
     let mut output: Box<dyn Write> = if let Some(file) = &expr.stdout_file {
         if expr.append_stdout {
             Box::new(
@@ -507,6 +525,7 @@ fn execute_single(expr: &Command, background: bool) -> bool {
     } else {
         Box::new(std::io::stdout())
     };
+
     let mut err_output: Box<dyn Write> = if let Some(file) = &expr.stderr_file {
         if expr.append_stderr {
             Box::new(
@@ -523,7 +542,21 @@ fn execute_single(expr: &Command, background: bool) -> bool {
         Box::new(std::io::stderr())
     };
 
-    if let Some(builtin) = Builtin::parse(&expr.command, &expr.args) {
+    // --- STAGE 17: ALIAS EXPANSION ---
+    let mut cmd_name = expr.command.clone();
+    let mut cmd_args = expr.args.clone();
+
+    if let Some(expanded) = state.aliases.get(&cmd_name) {
+        let mut parts: Vec<String> = expanded.split_whitespace().map(String::from).collect();
+        if !parts.is_empty() {
+            cmd_name = parts.remove(0);
+            parts.extend(cmd_args);
+            cmd_args = parts;
+        }
+    }
+
+    // Pass the expanded cmd_name and cmd_args to Builtin::parse
+    if let Some(builtin) = Builtin::parse(&cmd_name, &cmd_args) {
         match builtin {
             Builtin::Exit(code) => std::process::exit(code),
             Builtin::Echo(args) => {
@@ -533,7 +566,7 @@ fn execute_single(expr: &Command, background: bool) -> bool {
             Builtin::Type(commands) => {
                 for cmd in commands {
                     match cmd.as_str() {
-                        "echo" | "exit" | "type" | "cd" | "pwd" | "export" => {
+                        "echo" | "exit" | "type" | "cd" | "pwd" | "export" | "alias" => {
                             writeln!(output, "{} is a shell builtin", cmd).unwrap()
                         }
                         _ => match find_in_path(&cmd) {
@@ -561,11 +594,28 @@ fn execute_single(expr: &Command, background: bool) -> bool {
                     false
                 }
             },
+            // NEW: The Alias Builtin Logic
+            Builtin::Alias(args) => {
+                if args.is_empty() {
+                    for (k, v) in &state.aliases {
+                        writeln!(output, "alias {}='{}'", k, v).unwrap();
+                    }
+                } else {
+                    for arg in args {
+                        if let Some((key, value)) = arg.split_once('=') {
+                            let clean_val = value.trim_matches(|c| c == '\'' || c == '"');
+                            state.aliases.insert(key.to_string(), clean_val.to_string());
+                        }
+                    }
+                }
+                true
+            }
         }
     } else {
-        if let Some(full_command) = find_in_path(&expr.command) {
+        // Use cmd_name and cmd_args for external binaries!
+        if let Some(full_command) = find_in_path(&cmd_name) {
             let mut child = std::process::Command::new(full_command);
-            child.args(&expr.args);
+            child.args(&cmd_args);
 
             if let Some(in_file) = &expr.stdin_file {
                 if let Ok(file) = File::open(in_file) {
@@ -611,18 +661,18 @@ fn execute_single(expr: &Command, background: bool) -> bool {
                     }
                 }
                 Err(e) => {
-                    eprintln!("{}: {}", expr.command, e);
+                    eprintln!("{}: {}", cmd_name, e);
                     false
                 }
             }
         } else {
-            println!("{}: command not found", expr.command);
+            println!("{}: command not found", cmd_name);
             false
         }
     }
 }
 
-fn execute_pipeline(pipeline: &[Command], background: bool) -> bool {
+fn execute_pipeline(state: &mut ShellState, pipeline: &[Command], background: bool) -> bool {
     let mut previous_stdout: Option<std::process::ChildStdout> = None;
     let mut builtin_buffer: Option<Vec<u8>> = None;
     let mut final_success = true;
@@ -630,7 +680,20 @@ fn execute_pipeline(pipeline: &[Command], background: bool) -> bool {
     for (i, cmd) in pipeline.iter().enumerate() {
         let is_last = i == pipeline.len() - 1;
 
-        if let Some(builtin) = Builtin::parse(&cmd.command, &cmd.args) {
+        // --- STAGE 17: ALIAS EXPANSION ---
+        let mut cmd_name = cmd.command.clone();
+        let mut cmd_args = cmd.args.clone();
+
+        if let Some(expanded) = state.aliases.get(&cmd_name) {
+            let mut parts: Vec<String> = expanded.split_whitespace().map(String::from).collect();
+            if !parts.is_empty() {
+                cmd_name = parts.remove(0);
+                parts.extend(cmd_args);
+                cmd_args = parts;
+            }
+        }
+
+        if let Some(builtin) = Builtin::parse(&cmd_name, &cmd_args) {
             let mut output = Vec::new();
             match builtin {
                 Builtin::Echo(args) => writeln!(output, "{}", args.join(" ")).unwrap(),
@@ -638,17 +701,32 @@ fn execute_pipeline(pipeline: &[Command], background: bool) -> bool {
                     writeln!(output, "{}", std::env::current_dir().unwrap().display()).unwrap()
                 }
                 Builtin::Type(commands) => {
-                    for cmd in commands {
-                        match cmd.as_str() {
-                            "echo" | "exit" | "type" | "cd" | "pwd" | "export" => {
-                                writeln!(output, "{} is a shell builtin", cmd).unwrap()
+                    for type_cmd in commands {
+                        match type_cmd.as_str() {
+                            "echo" | "exit" | "type" | "cd" | "pwd" | "export" | "alias" => {
+                                writeln!(output, "{} is a shell builtin", type_cmd).unwrap()
                             }
-                            _ => match find_in_path(&cmd) {
+                            _ => match find_in_path(&type_cmd) {
                                 Some(full_cmd) => {
-                                    writeln!(output, "{} is {}", cmd, full_cmd.display()).unwrap()
+                                    writeln!(output, "{} is {}", type_cmd, full_cmd.display())
+                                        .unwrap()
                                 }
-                                None => writeln!(output, "{}: not found", cmd).unwrap(),
+                                None => writeln!(output, "{}: not found", type_cmd).unwrap(),
                             },
+                        }
+                    }
+                }
+                Builtin::Alias(alias_args) => {
+                    if alias_args.is_empty() {
+                        for (k, v) in &state.aliases {
+                            writeln!(output, "alias {}='{}'", k, v).unwrap();
+                        }
+                    } else {
+                        for arg in alias_args {
+                            if let Some((key, value)) = arg.split_once('=') {
+                                let clean_val = value.trim_matches(|c| c == '\'' || c == '"');
+                                state.aliases.insert(key.to_string(), clean_val.to_string());
+                            }
                         }
                     }
                 }
@@ -662,9 +740,9 @@ fn execute_pipeline(pipeline: &[Command], background: bool) -> bool {
                 builtin_buffer = Some(output);
             }
         } else {
-            if let Some(full_command) = find_in_path(&cmd.command) {
+            if let Some(full_command) = find_in_path(&cmd_name) {
                 let mut child = std::process::Command::new(full_command);
-                child.args(&cmd.args);
+                child.args(&cmd_args);
 
                 if let Some(out) = previous_stdout.take() {
                     child.stdin(std::process::Stdio::from(out));
@@ -676,6 +754,7 @@ fn execute_pipeline(pipeline: &[Command], background: bool) -> bool {
                 if !is_last {
                     child.stdout(std::process::Stdio::piped());
                 }
+
                 if let Some(err_file) = &cmd.stderr_file {
                     let file = if cmd.append_stderr {
                         OpenOptions::new()
@@ -688,6 +767,7 @@ fn execute_pipeline(pipeline: &[Command], background: bool) -> bool {
                     };
                     child.stderr(std::process::Stdio::from(file));
                 }
+
                 let mut spawned = child.spawn().expect("failed to spawn");
 
                 if let Some(buf) = builtin_buffer.take() {
@@ -707,7 +787,7 @@ fn execute_pipeline(pipeline: &[Command], background: bool) -> bool {
                     }
                 }
             } else {
-                println!("{}: command not found", cmd.command);
+                println!("{}: command not found", cmd_name);
                 return false;
             }
         }

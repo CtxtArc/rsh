@@ -8,7 +8,7 @@ use std::path::PathBuf;
 enum Operator {
     And,
     Or,
-    Async, // Background execution (&)
+    Async,
     None,
 }
 
@@ -68,6 +68,8 @@ struct Command {
     stdin_file: Option<String>,
     stdout_file: Option<String>,
     append_stdout: bool,
+    stderr_file: Option<String>,
+    append_stderr: bool,
 }
 
 impl Command {
@@ -79,6 +81,8 @@ impl Command {
                 stdin_file: None,
                 stdout_file: None,
                 append_stdout: false,
+                stderr_file: None,
+                append_stderr: false,
             };
         }
 
@@ -86,6 +90,8 @@ impl Command {
         let mut stdin_file = None;
         let mut stdout_file = None;
         let mut append_stdout = false;
+        let mut stderr_file = None;
+        let mut append_stderr = false;
 
         let mut i = 0;
         while i < tokens.len() {
@@ -107,6 +113,21 @@ impl Command {
                     if i + 1 < tokens.len() {
                         stdout_file = Some(expand_word(&tokens[i + 1]));
                         append_stdout = true;
+                        i += 1;
+                    }
+                }
+
+                "2>" => {
+                    if i + 1 < tokens.len() {
+                        stderr_file = Some(expand_word(&tokens[i + 1]));
+                        append_stderr = false;
+                        i += 1;
+                    }
+                }
+                "2>>" => {
+                    if i + 1 < tokens.len() {
+                        stderr_file = Some(expand_word(&tokens[i + 1]));
+                        append_stderr = true;
                         i += 1;
                     }
                 }
@@ -149,6 +170,13 @@ impl Command {
                 *file = file.replacen('~', &home_dir, 1);
             }
         }
+        if let Some(ref mut file) = stderr_file {
+            if file == "~" {
+                *file = home_dir.clone();
+            } else if file.starts_with("~/") {
+                *file = file.replacen('~', &home_dir, 1);
+            }
+        }
 
         Command {
             command,
@@ -156,6 +184,8 @@ impl Command {
             stdin_file,
             stdout_file,
             append_stdout,
+            stderr_file,
+            append_stderr,
         }
     }
 }
@@ -477,6 +507,21 @@ fn execute_single(expr: &Command, background: bool) -> bool {
     } else {
         Box::new(std::io::stdout())
     };
+    let mut err_output: Box<dyn Write> = if let Some(file) = &expr.stderr_file {
+        if expr.append_stderr {
+            Box::new(
+                OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(file)
+                    .unwrap(),
+            )
+        } else {
+            Box::new(File::create(file).unwrap())
+        }
+    } else {
+        Box::new(std::io::stderr())
+    };
 
     if let Some(builtin) = Builtin::parse(&expr.command, &expr.args) {
         match builtin {
@@ -512,7 +557,7 @@ fn execute_single(expr: &Command, background: bool) -> bool {
             Builtin::Cd(path) => match std::env::set_current_dir(&path) {
                 Ok(_) => true,
                 Err(_) => {
-                    println!("cd: {}: No such file or directory", path);
+                    writeln!(err_output, "cd: {}: No such file or directory", path).unwrap();
                     false
                 }
             },
@@ -541,6 +586,19 @@ fn execute_single(expr: &Command, background: bool) -> bool {
                     File::create(out_file).unwrap()
                 };
                 child.stdout(std::process::Stdio::from(file));
+            }
+
+            if let Some(err_file) = &expr.stderr_file {
+                let file = if expr.append_stderr {
+                    OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(err_file)
+                        .unwrap()
+                } else {
+                    File::create(err_file).unwrap()
+                };
+                child.stderr(std::process::Stdio::from(file));
             }
 
             match child.spawn() {
@@ -618,7 +676,18 @@ fn execute_pipeline(pipeline: &[Command], background: bool) -> bool {
                 if !is_last {
                     child.stdout(std::process::Stdio::piped());
                 }
-
+                if let Some(err_file) = &cmd.stderr_file {
+                    let file = if cmd.append_stderr {
+                        OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(err_file)
+                            .unwrap()
+                    } else {
+                        File::create(err_file).unwrap()
+                    };
+                    child.stderr(std::process::Stdio::from(file));
+                }
                 let mut spawned = child.spawn().expect("failed to spawn");
 
                 if let Some(buf) = builtin_buffer.take() {
@@ -645,6 +714,7 @@ fn execute_pipeline(pipeline: &[Command], background: bool) -> bool {
     }
     final_success
 }
+
 fn find_in_path(command: &str) -> Option<PathBuf> {
     let path_var = std::env::var("PATH").unwrap_or_default();
     for path in std::env::split_paths(&path_var) {

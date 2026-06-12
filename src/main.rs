@@ -253,69 +253,98 @@ fn expand_glob(word: &str) -> Vec<String> {
     }
 }
 
-fn expand_word(word: &str) -> String {
+pub fn expand_word(input: &str) -> String {
     let mut result = String::new();
-    let mut chars = word.chars().peekable();
     let mut in_single = false;
     let mut in_double = false;
+    let mut escaped = false;
 
-    while let Some(c) = chars.next() {
+    let chars: Vec<char> = input.chars().collect();
+    let mut i = 0;
+
+    while i < chars.len() {
+        let c = chars[i];
+
+        if escaped {
+            result.push(c);
+            escaped = false;
+            i += 1;
+            continue;
+        }
+
         match c {
-            '\'' if !in_double => in_single = !in_single,
-            '"' if !in_single => in_double = !in_double,
+            '\\' => {
+                if in_single {
+                    result.push(c); // Backslashes are literal in single quotes
+                } else {
+                    escaped = true; // Skip this slash, escape the next char
+                }
+            }
+            '\'' if !in_double => {
+                in_single = !in_single; // Skip adding the quote to the result
+            }
+            '"' if !in_single => {
+                in_double = !in_double; // Skip adding the quote to the result
+            }
             '$' if !in_single => {
-                if let Some(&'(') = chars.peek() {
-                    chars.next();
-                    let mut inner_cmd = String::new();
+                // --- NEW: COMMAND SUBSTITUTION $(...) ---
+                if i + 1 < chars.len() && chars[i + 1] == '(' {
+                    i += 2; // Skip '$' and '('
+                    let mut sub_cmd = String::new();
                     let mut paren_count = 1;
 
-                    while let Some(inner_c) = chars.next() {
-                        if inner_c == '(' {
+                    // Extract the inner command, respecting nested parentheses
+                    while i < chars.len() && paren_count > 0 {
+                        if chars[i] == '(' {
                             paren_count += 1;
-                        } else if inner_c == ')' {
+                        } else if chars[i] == ')' {
                             paren_count -= 1;
-                            if paren_count == 0 {
-                                break;
-                            }
                         }
-                        inner_cmd.push(inner_c);
+
+                        if paren_count > 0 {
+                            sub_cmd.push(chars[i]);
+                        }
+                        i += 1;
                     }
 
+                    // Execute the subshell by calling our own binary!
                     if let Ok(exe) = std::env::current_exe() {
                         if let Ok(output) = std::process::Command::new(exe)
                             .arg("-c")
-                            .arg(&inner_cmd)
+                            .arg(&sub_cmd)
                             .output()
                         {
                             let out_str = String::from_utf8_lossy(&output.stdout);
-                            result.push_str(out_str.trim_end_matches(|c| c == '\n' || c == '\r'));
+                            // POSIX rules: command substitution strips trailing newlines
+                            result.push_str(out_str.trim_end_matches('\n'));
                         }
                     }
-                } else {
-                    let mut var_name = String::new();
-                    while let Some(&next_c) = chars.peek() {
-                        if next_c.is_alphanumeric() || next_c == '_' {
-                            var_name.push(next_c);
-                            chars.next();
-                        } else {
-                            break;
-                        }
-                    }
-                    if !var_name.is_empty() {
-                        if let Ok(val) = std::env::var(&var_name) {
-                            result.push_str(&val);
-                        }
-                    } else {
-                        result.push('$');
-                    }
+                    continue;
                 }
+
+                // --- EXISTING: VARIABLE EXPANSION $VAR ---
+                let mut var_name = String::new();
+                i += 1; // Skip '$'
+                while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                    var_name.push(chars[i]);
+                    i += 1;
+                }
+
+                // Expand from the current environment
+                if let Ok(val) = std::env::var(&var_name) {
+                    result.push_str(&val);
+                }
+                continue;
             }
-            _ => result.push(c),
+            _ => {
+                result.push(c);
+            }
         }
+        i += 1;
     }
+
     result
 }
-
 fn parse_logic(tokens: &[String]) -> Vec<LogicalGroup> {
     let mut groups = Vec::new();
     let mut current_tokens = Vec::new();
@@ -817,77 +846,77 @@ fn find_in_path(command: &str) -> Option<PathBuf> {
     None
 }
 
-fn tokenize(input: &str) -> Vec<String> {
+pub fn tokenize(input: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut current_token = String::new();
-    let mut in_single_quote = false;
-    let mut in_double_quote = false;
+
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+    // NEW: Track subshell depth so we don't split spaces inside $(...)
     let mut subshell_depth = 0;
 
-    let mut chars = input.chars().peekable();
+    let chars: Vec<char> = input.chars().collect();
+    let mut i = 0;
 
-    while let Some(c) = chars.next() {
+    while i < chars.len() {
+        let c = chars[i];
+
+        if escaped {
+            current_token.push(c);
+            escaped = false;
+            i += 1;
+            continue;
+        }
+
         match c {
-            '\'' if !in_double_quote && subshell_depth == 0 => {
-                in_single_quote = !in_single_quote;
+            '\\' => {
+                escaped = true;
                 current_token.push(c);
             }
-            '"' if !in_single_quote && subshell_depth == 0 => {
-                in_double_quote = !in_double_quote;
+            '\'' if !in_double => {
+                in_single = !in_single;
                 current_token.push(c);
             }
-            '$' if !in_single_quote => {
+            '"' if !in_single => {
+                in_double = !in_double;
                 current_token.push(c);
-                if let Some(&'(') = chars.peek() {
-                    chars.next();
+            }
+            '$' if !in_single => {
+                current_token.push(c);
+                // Check if a subshell is starting
+                if i + 1 < chars.len() && chars[i + 1] == '(' {
                     current_token.push('(');
                     subshell_depth += 1;
+                    i += 2;
+                    continue;
                 }
             }
-            '(' if subshell_depth > 0 => {
+            '(' if subshell_depth > 0 && !in_single && !in_double => {
+                subshell_depth += 1; // Handle nested subshells like $(echo $(ls))
                 current_token.push(c);
-                subshell_depth += 1;
             }
-            ')' if subshell_depth > 0 => {
-                current_token.push(c);
+            ')' if subshell_depth > 0 && !in_single && !in_double => {
                 subshell_depth -= 1;
+                current_token.push(c);
             }
-            ' ' if !in_single_quote && !in_double_quote && subshell_depth == 0 => {
+            ' ' | '\t' | '\n' if !in_single && !in_double && subshell_depth == 0 => {
+                // Only split on spaces if we are NOT in quotes and NOT in a subshell
                 if !current_token.is_empty() {
                     tokens.push(current_token.clone());
                     current_token.clear();
                 }
             }
-            '|' if !in_single_quote && !in_double_quote && subshell_depth == 0 => {
-                if !current_token.is_empty() {
-                    tokens.push(current_token.clone());
-                    current_token.clear();
-                }
-                if let Some(&'|') = chars.peek() {
-                    chars.next();
-                    tokens.push("||".to_string());
-                } else {
-                    tokens.push("|".to_string());
-                }
+            _ => {
+                current_token.push(c);
             }
-            '&' if !in_single_quote && !in_double_quote && subshell_depth == 0 => {
-                if !current_token.is_empty() {
-                    tokens.push(current_token.clone());
-                    current_token.clear();
-                }
-                if let Some(&'&') = chars.peek() {
-                    chars.next();
-                    tokens.push("&&".to_string());
-                } else {
-                    tokens.push("&".to_string());
-                }
-            }
-            _ => current_token.push(c),
         }
+        i += 1;
     }
 
     if !current_token.is_empty() {
         tokens.push(current_token);
     }
+
     tokens
 }

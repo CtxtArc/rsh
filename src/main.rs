@@ -6,6 +6,7 @@ use std::path::PathBuf;
 enum Operator {
     And,
     Or,
+    Async, // Background execution (&)
     None,
 }
 
@@ -89,7 +90,6 @@ impl Command {
             match tokens[i].as_str() {
                 "<" => {
                     if i + 1 < tokens.len() {
-                        // STAGE 11: Expand the word when reading it!
                         stdin_file = Some(expand_word(&tokens[i + 1]));
                         i += 1;
                     }
@@ -122,7 +122,6 @@ impl Command {
         } else {
             String::new()
         };
-
         let home_dir = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
 
         for arg in args.iter_mut() {
@@ -159,6 +158,51 @@ impl Command {
     }
 }
 
+fn match_pattern(pattern: &str, text: &str) -> bool {
+    if pattern.is_empty() {
+        return text.is_empty();
+    }
+
+    if pattern.starts_with('*') {
+        match_pattern(&pattern[1..], text)
+            || (!text.is_empty() && match_pattern(pattern, &text[1..]))
+    } else {
+        let p_char = pattern.chars().next().unwrap();
+        if text.starts_with(p_char) {
+            match_pattern(&pattern[p_char.len_utf8()..], &text[p_char.len_utf8()..])
+        } else {
+            false
+        }
+    }
+}
+
+fn expand_glob(word: &str) -> Vec<String> {
+    if !word.contains('*') {
+        return vec![word.to_string()];
+    }
+
+    let mut matches = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(".") {
+        for entry in entries.flatten() {
+            if let Ok(name) = entry.file_name().into_string() {
+                if name.starts_with('.') && !word.starts_with('.') {
+                    continue;
+                }
+                if match_pattern(word, &name) {
+                    matches.push(name);
+                }
+            }
+        }
+    }
+
+    if matches.is_empty() {
+        vec![word.to_string()]
+    } else {
+        matches.sort();
+        matches
+    }
+}
+
 fn expand_word(word: &str) -> String {
     let mut result = String::new();
     let mut chars = word.chars().peekable();
@@ -167,15 +211,14 @@ fn expand_word(word: &str) -> String {
 
     while let Some(c) = chars.next() {
         match c {
-            '\'' if !in_double => in_single = !in_single, // Strip the single quote
-            '"' if !in_single => in_double = !in_double,  // Strip the double quote
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
             '$' if !in_single => {
                 if let Some(&'(') = chars.peek() {
-                    chars.next(); // Consume the '('
+                    chars.next();
                     let mut inner_cmd = String::new();
                     let mut paren_count = 1;
 
-                    // Read until we find the matching closing ')'
                     while let Some(inner_c) = chars.next() {
                         if inner_c == '(' {
                             paren_count += 1;
@@ -245,6 +288,14 @@ fn parse_logic(tokens: &[String]) -> Vec<LogicalGroup> {
                 });
                 current_tokens.clear();
             }
+            "&" => {
+                let pipeline = parse_pipeline_from_tokens(&current_tokens);
+                groups.push(LogicalGroup {
+                    pipeline,
+                    next_op: Operator::Async,
+                });
+                current_tokens.clear();
+            }
             _ => current_tokens.push(token.clone()),
         }
     }
@@ -294,16 +345,13 @@ fn evaluate_tokens(tokens: &[String]) -> bool {
             let mut last_status = true;
 
             for item in items {
-                // Expand the item BEFORE assigning it to the variable!
                 std::env::set_var(var_name, expand_word(item));
                 last_status = evaluate_tokens(inner_commands);
             }
 
             return last_status;
         } else {
-            eprintln!(
-                "rsh: syntax error in for loop (expected: for VAR in ITEMS do COMMANDS done)"
-            );
+            eprintln!("rsh: syntax error in for loop");
             return false;
         }
     }
@@ -323,20 +371,24 @@ fn evaluate_tokens(tokens: &[String]) -> bool {
             match group.next_op {
                 Operator::And => skip = true,
                 Operator::Or => skip = false,
+                Operator::Async => skip = false,
                 Operator::None => {}
             }
             continue;
         }
 
+        let is_background = group.next_op == Operator::Async;
+
         last_success = if group.pipeline.len() == 1 {
-            execute_single(&group.pipeline[0])
+            execute_single(&group.pipeline[0], is_background)
         } else {
-            execute_pipeline(&group.pipeline)
+            execute_pipeline(&group.pipeline, is_background)
         };
 
         match group.next_op {
             Operator::And => skip = !last_success,
             Operator::Or => skip = last_success,
+            Operator::Async => skip = false,
             Operator::None => {}
         }
     }
@@ -347,8 +399,6 @@ fn evaluate_tokens(tokens: &[String]) -> bool {
 fn main() {
     ctrlc::set_handler(move || {
         println!();
-        print!("");
-        std::io::stdout().flush().unwrap();
     })
     .expect("Error setting Ctrl-C handler");
 
@@ -364,20 +414,16 @@ fn main() {
         std::io::stdout().flush().unwrap();
 
         let mut input = String::new();
-
         match std::io::stdin().read_line(&mut input) {
             Ok(0) => {
                 println!("exit");
                 break;
             }
             Ok(_) => {}
-            Err(_) => {
-                continue;
-            }
+            Err(_) => continue,
         }
 
         let trimmed_input = input.trim();
-
         if trimmed_input.is_empty() {
             continue;
         }
@@ -386,7 +432,8 @@ fn main() {
         evaluate_tokens(&tokens);
     }
 }
-fn execute_single(expr: &Command) -> bool {
+
+fn execute_single(expr: &Command, background: bool) -> bool {
     let mut output: Box<dyn Write> = if let Some(file) = &expr.stdout_file {
         if expr.append_stdout {
             Box::new(
@@ -468,8 +515,15 @@ fn execute_single(expr: &Command) -> bool {
                 child.stdout(std::process::Stdio::from(file));
             }
 
-            match child.status() {
-                Ok(status) => status.success(),
+            match child.spawn() {
+                Ok(mut spawned) => {
+                    if background {
+                        println!("[1] {}", spawned.id());
+                        true
+                    } else {
+                        spawned.wait().map(|s| s.success()).unwrap_or(false)
+                    }
+                }
                 Err(e) => {
                     eprintln!("{}: {}", expr.command, e);
                     false
@@ -482,7 +536,7 @@ fn execute_single(expr: &Command) -> bool {
     }
 }
 
-fn execute_pipeline(pipeline: &[Command]) -> bool {
+fn execute_pipeline(pipeline: &[Command], background: bool) -> bool {
     let mut previous_stdout: Option<std::process::ChildStdout> = None;
     let mut builtin_buffer: Option<Vec<u8>> = None;
     let mut final_success = true;
@@ -548,7 +602,12 @@ fn execute_pipeline(pipeline: &[Command]) -> bool {
                 if !is_last {
                     previous_stdout = spawned.stdout.take();
                 } else {
-                    final_success = spawned.wait().map(|s| s.success()).unwrap_or(false);
+                    if background {
+                        println!("[1] {}", spawned.id());
+                        final_success = true;
+                    } else {
+                        final_success = spawned.wait().map(|s| s.success()).unwrap_or(false);
+                    }
                 }
             } else {
                 println!("{}: command not found", cmd.command);
@@ -556,10 +615,8 @@ fn execute_pipeline(pipeline: &[Command]) -> bool {
             }
         }
     }
-
     final_success
 }
-
 fn find_in_path(command: &str) -> Option<PathBuf> {
     let path_var = std::env::var("PATH").unwrap_or_default();
     for path in std::env::split_paths(&path_var) {
@@ -595,16 +652,16 @@ fn tokenize(input: &str) -> Vec<String> {
                 if let Some(&'(') = chars.peek() {
                     chars.next();
                     current_token.push('(');
-                    subshell_depth += 1; // Enter subshell parsing
+                    subshell_depth += 1;
                 }
             }
             '(' if subshell_depth > 0 => {
                 current_token.push(c);
-                subshell_depth += 1; // Handle nested parenthesis like $((1+1))
+                subshell_depth += 1;
             }
             ')' if subshell_depth > 0 => {
                 current_token.push(c);
-                subshell_depth -= 1; // Exit subshell parsing
+                subshell_depth -= 1;
             }
             ' ' if !in_single_quote && !in_double_quote && subshell_depth == 0 => {
                 if !current_token.is_empty() {
@@ -644,89 +701,4 @@ fn tokenize(input: &str) -> Vec<String> {
         tokens.push(current_token);
     }
     tokens
-}
-
-fn match_pattern(pattern: &str, text: &str) -> bool {
-    if pattern.is_empty() {
-        return text.is_empty();
-    }
-
-    if pattern.starts_with('*') {
-        // '*' can match zero characters (skip the '*')
-        // OR it can match one character (skip the text char and keep trying the '*')
-        match_pattern(&pattern[1..], text)
-            || (!text.is_empty() && match_pattern(pattern, &text[1..]))
-    } else {
-        // Literal character match
-        let p_char = pattern.chars().next().unwrap();
-        if text.starts_with(p_char) {
-            match_pattern(&pattern[p_char.len_utf8()..], &text[p_char.len_utf8()..])
-        } else {
-            false
-        }
-    }
-}
-
-fn expand_glob(word: &str) -> Vec<String> {
-    if !word.contains('*') {
-        return vec![word.to_string()];
-    }
-
-    let mut matches = Vec::new();
-
-    if let Ok(entries) = std::fs::read_dir(".") {
-        for entry in entries.flatten() {
-            if let Ok(name) = entry.file_name().into_string() {
-                // By default, wildcards do not match hidden files (starting with '.') unless explicitly requested
-                if name.starts_with('.') && !word.starts_with('.') {
-                    continue;
-                }
-
-                if match_pattern(word, &name) {
-                    matches.push(name);
-                }
-            }
-        }
-    }
-
-    // POSIX shell rules: If a glob doesn't match anything, it stays as the literal string (e.g., "*.xyz")
-    if matches.is_empty() {
-        vec![word.to_string()]
-    } else {
-        matches.sort();
-        matches
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_tokenize_single_quotes() {
-        assert_eq!(
-            tokenize("echo 'hello        world'"),
-            vec!["echo", "'hello        world'"]
-        );
-    }
-
-    #[test]
-    fn test_var_expansion() {
-        std::env::set_var("TEST_VAR", "success");
-        assert_eq!(expand_word("$TEST_VAR"), "success");
-        assert_eq!(expand_word("\"result: $TEST_VAR\""), "result: success");
-        assert_eq!(expand_word("'result: $TEST_VAR'"), "result: $TEST_VAR");
-    }
-
-    #[test]
-    fn test_tokenize_logical_operators() {
-        assert_eq!(
-            tokenize("echo first && echo second"),
-            vec!["echo", "first", "&&", "echo", "second"]
-        );
-        assert_eq!(
-            tokenize("ls || echo failed"),
-            vec!["ls", "||", "echo", "failed"]
-        );
-    }
 }

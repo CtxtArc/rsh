@@ -3,16 +3,35 @@ use rustyline::DefaultEditor;
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum JobStatus {
+    Running,
+    Stopped,
+}
+
+pub struct Job {
+    pub id: usize,
+    pub pgid: i32,
+    pub command: String,
+    pub status: JobStatus,
+}
 
 struct ShellState {
     aliases: HashMap<String, String>,
+    // --- STAGE 20: JOB CONTROL STATE ---
+    jobs: Vec<Job>,
+    job_id_counter: usize,
 }
 
 impl ShellState {
     fn new() -> Self {
         ShellState {
             aliases: HashMap::new(),
+            jobs: Vec::new(),
+            job_id_counter: 1,
         }
     }
 }
@@ -38,6 +57,9 @@ enum Builtin {
     Cd(String),
     Export(String, String),
     Alias(Vec<String>),
+    Jobs,
+    Fg(Option<usize>),
+    Bg(Option<usize>),
 }
 
 impl Builtin {
@@ -74,6 +96,15 @@ impl Builtin {
             "alias" => {
                 let alias_args = args.iter().map(|s| s.to_string()).collect();
                 Some(Builtin::Alias(alias_args))
+            }
+            "jobs" => Some(Builtin::Jobs),
+            "fg" => {
+                let id = args.first().and_then(|s| s.parse::<usize>().ok());
+                Some(Builtin::Fg(id))
+            }
+            "bg" => {
+                let id = args.first().and_then(|s| s.parse::<usize>().ok());
+                Some(Builtin::Bg(id))
             }
             _ => None,
         }
@@ -498,7 +529,27 @@ fn main() {
     })
     .expect("Error setting Ctrl-C handler");
 
+    // --- STAGE 20: TERMINAL INDEPENDENCE (Inside main!) ---
+    unsafe {
+        // 1. Ignore background read/write signals
+        libc::signal(libc::SIGTTOU, libc::SIG_IGN);
+        libc::signal(libc::SIGTTIN, libc::SIG_IGN);
+
+        // 2. IMPORTANT: Tell the OS that Ctrl-Z should NEVER suspend the shell itself!
+        libc::signal(libc::SIGTSTP, libc::SIG_IGN);
+
+        // 3. Put the shell into its own isolated process group
+        let shell_pgid = libc::getpid();
+        if libc::setpgid(shell_pgid, shell_pgid) < 0 {
+            eprintln!("Warning: Failed to put shell in its own process group.");
+        }
+
+        // 4. Seize absolute control of the terminal keyboard
+        libc::tcsetpgrp(libc::STDIN_FILENO, shell_pgid);
+    }
+
     // Handle Subshell / Script execution (-c flag)
+    // ...    // Handle Subshell / Script execution (-c flag)
     let args: Vec<String> = std::env::args().collect();
     if args.len() >= 3 && args[1] == "-c" {
         let tokens = tokenize(&args[2]);
@@ -627,6 +678,75 @@ fn execute_single(state: &mut ShellState, expr: &Command, background: bool) -> b
                 std::env::set_var(key, value);
                 true
             }
+            // Print out all tracked jobs
+            Builtin::Jobs => {
+                // Clean up dead background jobs first by checking status non-blockingly
+                state.jobs.retain(|job| {
+                    let mut status = 0;
+                    let res = unsafe { libc::waitpid(job.pgid, &mut status, libc::WNOHANG) };
+                    res == 0 // Keep it if it hasn't exited yet
+                });
+
+                for job in &state.jobs {
+                    let status_str = match job.status {
+                        JobStatus::Running => "Running",
+                        JobStatus::Stopped => "Stopped",
+                    };
+                    writeln!(output, "[{}]  {}    {}", job.id, status_str, job.command).unwrap();
+                }
+                true
+            }
+
+            // Bring a background/stopped job to the foreground
+            Builtin::Fg(target_id) => {
+                let id = target_id.unwrap_or(1); // Default to first job if not specified
+                if let Some(pos) = state.jobs.iter().position(|j| j.id == id) {
+                    let job = state.jobs.remove(pos); // Pull it out of background tracking
+
+                    println!("{}", job.command);
+                    unsafe {
+                        // If it was stopped, wake it back up with a continue signal
+                        libc::kill(-job.pgid, libc::SIGCONT);
+                        // Hand over terminal control
+                        libc::tcsetpgrp(libc::STDIN_FILENO, job.pgid);
+
+                        let mut status = 0;
+                        libc::waitpid(job.pgid, &mut status, libc::WUNTRACED);
+
+                        // Reclaim terminal control
+                        libc::tcsetpgrp(libc::STDIN_FILENO, libc::getpid());
+
+                        if libc::WIFSTOPPED(status) {
+                            println!("\n[{}] + Stopped          {}", id, job.command);
+                            state.jobs.push(Job {
+                                status: JobStatus::Stopped,
+                                ..job
+                            });
+                        }
+                    }
+                } else {
+                    writeln!(err_output, "rsh: fg: No such job: {}", id).unwrap();
+                }
+                true
+            }
+
+            // Resume a stopped job silently in the background
+            Builtin::Bg(target_id) => {
+                let id = target_id.unwrap_or(1);
+                if let Some(job) = state.jobs.iter_mut().find(|j| j.id == id) {
+                    if job.status == JobStatus::Stopped {
+                        unsafe {
+                            // Wake up the entire process group in the background
+                            libc::kill(-job.pgid, libc::SIGCONT);
+                        }
+                        job.status = JobStatus::Running;
+                        println!("[{}] {} &", job.id, job.command);
+                    }
+                } else {
+                    writeln!(err_output, "rsh: bg: No such job: {}", id).unwrap();
+                }
+                true
+            }
             Builtin::Cd(path) => match std::env::set_current_dir(&path) {
                 Ok(_) => true,
                 Err(_) => {
@@ -652,52 +772,120 @@ fn execute_single(state: &mut ShellState, expr: &Command, background: bool) -> b
             }
         }
     } else {
-        // Use cmd_name and cmd_args for external binaries!
         if let Some(full_command) = find_in_path(&cmd_name) {
             let mut child = std::process::Command::new(full_command);
             child.args(&cmd_args);
 
+            // --- STANDARD INPUT REDIRECTION (<) ---
             if let Some(in_file) = &expr.stdin_file {
-                if let Ok(file) = File::open(in_file) {
+                if let Ok(file) = std::fs::File::open(in_file) {
                     child.stdin(std::process::Stdio::from(file));
                 } else {
                     eprintln!("{}: No such file or directory", in_file);
                     return false;
                 }
             }
+
+            // --- STANDARD OUTPUT REDIRECTION (>, >>) ---
             if let Some(out_file) = &expr.stdout_file {
                 let file = if expr.append_stdout {
-                    OpenOptions::new()
+                    std::fs::OpenOptions::new()
                         .create(true)
                         .append(true)
                         .open(out_file)
                         .unwrap()
                 } else {
-                    File::create(out_file).unwrap()
+                    std::fs::File::create(out_file).unwrap()
                 };
                 child.stdout(std::process::Stdio::from(file));
             }
 
+            // --- STANDARD ERROR REDIRECTION (2>, 2>>) ---
             if let Some(err_file) = &expr.stderr_file {
                 let file = if expr.append_stderr {
-                    OpenOptions::new()
+                    std::fs::OpenOptions::new()
                         .create(true)
                         .append(true)
                         .open(err_file)
                         .unwrap()
                 } else {
-                    File::create(err_file).unwrap()
+                    std::fs::File::create(err_file).unwrap()
                 };
                 child.stderr(std::process::Stdio::from(file));
+            } // --- PROCESS ISOLATION ---
+              // Force the child process to start its own isolated process group
+              // so signals like Ctrl-C and Ctrl-Z don't hit the parent shell!
+            unsafe {
+                child.pre_exec(|| {
+                    // Force the child into its own process group
+                    libc::setpgid(0, 0);
+
+                    // Strip the child of the shell's signal immunities!
+                    // This allows the child to be stopped (Ctrl-Z) and killed (Ctrl-C).
+                    libc::signal(libc::SIGINT, libc::SIG_DFL);
+                    libc::signal(libc::SIGQUIT, libc::SIG_DFL);
+                    libc::signal(libc::SIGTSTP, libc::SIG_DFL);
+                    libc::signal(libc::SIGTTIN, libc::SIG_DFL);
+                    libc::signal(libc::SIGTTOU, libc::SIG_DFL);
+
+                    Ok(())
+                });
             }
 
             match child.spawn() {
-                Ok(mut spawned) => {
+                Ok(spawned) => {
+                    let pid = spawned.id() as i32;
+                    // Because we ran setpgid(0,0), the child's PID becomes its PGID
+                    let pgid = pid;
+
                     if background {
-                        println!("[1] {}", spawned.id());
+                        // Save to job list as running in background
+                        let job_id = state.job_id_counter;
+                        state.jobs.push(Job {
+                            id: job_id,
+                            pgid,
+                            command: format!("{} {}", cmd_name, cmd_args.join(" ")),
+                            status: JobStatus::Running,
+                        });
+                        println!("[{}] {}", job_id, pid);
+                        state.job_id_counter += 1;
                         true
                     } else {
-                        spawned.wait().map(|s| s.success()).unwrap_or(false)
+                        // --- FOREGROUND TERMINAL HANDSHAKE ---
+                        unsafe {
+                            // Give terminal keyboard control to the child's process group
+                            libc::tcsetpgrp(libc::STDIN_FILENO, pgid);
+                        }
+
+                        // Wait for the child, monitoring if it finishes OR gets stopped
+                        let mut status: libc::c_int = 0;
+                        unsafe {
+                            libc::waitpid(pgid, &mut status, libc::WUNTRACED);
+                        }
+
+                        // --- RECLAIM TERMINAL CONTROL ---
+                        unsafe {
+                            // Immediately take keyboard control back for the shell
+                            libc::tcsetpgrp(libc::STDIN_FILENO, libc::getpid());
+                        }
+
+                        // Analyze what happened to the child process
+                        if libc::WIFSTOPPED(status) {
+                            // The user pressed Ctrl-Z! The process is suspended.
+                            let job_id = state.job_id_counter;
+                            state.jobs.push(Job {
+                                id: job_id,
+                                pgid,
+                                command: format!("{} {}", cmd_name, cmd_args.join(" ")),
+                                status: JobStatus::Stopped,
+                            });
+                            println!("\n[{}] + Stopped          {}", job_id, cmd_name);
+                            state.job_id_counter += 1;
+                            true
+                        } else {
+                            // Process finished normally or was killed by Ctrl-C
+                            libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0
+                        }
                     }
                 }
                 Err(e) => {
@@ -771,6 +959,29 @@ fn execute_pipeline(state: &mut ShellState, pipeline: &[Command], background: bo
                     }
                 }
                 Builtin::Cd(_) | Builtin::Exit(_) | Builtin::Export(_, _) => {}
+
+                Builtin::Jobs => {
+                    // Clean up dead jobs non-blockingly
+                    state.jobs.retain(|job| {
+                        let mut status = 0;
+                        let res = unsafe { libc::waitpid(job.pgid, &mut status, libc::WNOHANG) };
+                        res == 0
+                    });
+
+                    for job in &state.jobs {
+                        let status_str = match job.status {
+                            JobStatus::Running => "Running",
+                            JobStatus::Stopped => "Stopped",
+                        };
+                        writeln!(output, "[{}]  {}    {}", job.id, status_str, job.command)
+                            .unwrap();
+                    }
+                }
+                Builtin::Fg(_) | Builtin::Bg(_) => {
+                    // fg and bg require raw terminal control, which messes up pipelines.
+                    // We just print an error if they try to pipe them.
+                    writeln!(output, "rsh: fg/bg not supported inside pipelines").unwrap();
+                }
             }
 
             if is_last {

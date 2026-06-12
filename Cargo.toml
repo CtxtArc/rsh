@@ -10,4 +10,5 @@ tempfile = "3.27.0"
 
 [dependencies]
 ctrlc = "3.5.2"
+libc = "0.2.186"
 rustyline = "18.0.0"

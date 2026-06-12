@@ -448,8 +448,22 @@ fn evaluate_tokens(state: &mut ShellState, tokens: &[String]) -> bool {
 
 fn main() {
     let mut state = ShellState::new();
-    // Keep the signal trap so child processes (like `sleep`) die
-    // without killing the parent shell.
+    let home_dir = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+    let history_file = PathBuf::from(&home_dir).join(".rsh_history");
+    let mut rl = DefaultEditor::new().expect("Failed to create readline editor");
+    let _ = rl.load_history(&history_file);
+
+    let rc_file = PathBuf::from(&home_dir).join(".rshrc");
+    if let Ok(contents) = std::fs::read_to_string(&rc_file) {
+        for line in contents.lines() {
+            let trimmed = line.trim();
+            // Ignore empty lines and comments!
+            if !trimmed.is_empty() && !trimmed.starts_with('#') {
+                let tokens = tokenize(trimmed);
+                evaluate_tokens(&mut state, &tokens);
+            }
+        }
+    }
     ctrlc::set_handler(move || {
         println!();
     })
@@ -462,9 +476,6 @@ fn main() {
         evaluate_tokens(&mut state, &tokens);
         return;
     }
-
-    // --- UX UPGRADE: INITIALIZE READLINE ---
-    let mut rl = DefaultEditor::new().expect("Failed to create readline editor");
 
     // Determine where to save the history file (~/.rsh_history)
     let home_dir = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());

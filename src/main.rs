@@ -105,15 +105,44 @@ fn main() {
                 }
                 input_buffer.push_str(&line);
 
-                let tokens = tokenize(&input_buffer);
+                let mut tokens = tokenize(&input_buffer);
                 if is_incomplete(&input_buffer, &tokens) {
                     continue; // Wait for the user to finish the block
                 }
+                if let Some(pos) = tokens.iter().position(|t| t == "<<") {
+                    if let Some(delimiter) = tokens.get(pos + 1).cloned() {
+                        let mut heredoc_content = String::new();
+                        let ps2 = std::env::var("PS2").unwrap_or_else(|_| "> ".to_string());
+                        let prompt_ps2 = format_prompt(&ps2);
 
-                let _ = rl.add_history_entry(input_buffer.trim());
+                        // Enter the secondary reading loop
+                        loop {
+                            match rl.readline(&prompt_ps2) {
+                                Ok(hline) => {
+                                    if hline.trim() == delimiter {
+                                        break;
+                                    }
+                                    heredoc_content.push_str(&hline);
+                                    heredoc_content.push('\n');
+                                }
+                                Err(_) => break, // Ctrl-C or Ctrl-D aborts the heredoc
+                            }
+                        }
+
+                        // Secretly overwrite the delimiter token with the giant string block!
+                        tokens[pos + 1] = heredoc_content;
+                    }
+                }
+                // ─────────────────────────────────────
+
+                rl.add_history_entry(&input_buffer).unwrap();
+
+                // Pass our intercepted tokens straight to the execution engine
+                evaluate_tokens(&mut state, &tokens);
+
+                input_buffer.clear();
                 let _ = rl.save_history(&history_file);
 
-                evaluate_tokens(&mut state, &tokens);
                 input_buffer.clear();
             }
             Err(ReadlineError::Interrupted) => {

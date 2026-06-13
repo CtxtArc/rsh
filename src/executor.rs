@@ -156,6 +156,9 @@ pub fn execute_single(state: &mut ShellState, cmd: &Command, background: bool) -
                 return false;
             }
         }
+    } else if cmd.heredoc_content.is_some() {
+        // NEW: If we have a heredoc, force the child to wait for our pipe!
+        child.stdin(std::process::Stdio::piped());
     }
 
     attach_output_redirects(
@@ -174,9 +177,15 @@ pub fn execute_single(state: &mut ShellState, cmd: &Command, background: bool) -
             state.last_exit_status = 126;
             false
         }
-        Ok(spawned) => {
+        Ok(mut spawned) => {
             let pid = spawned.id() as i32;
             let pgid = pid;
+            if let Some(content) = &cmd.heredoc_content {
+                if let Some(mut stdin) = spawned.stdin.take() {
+                    // Write the string and drop the pipe so the child sees EOF
+                    let _ = stdin.write_all(content.as_bytes());
+                }
+            }
 
             if background {
                 let job_id = state.job_id_counter;
@@ -249,6 +258,9 @@ pub fn execute_pipeline(state: &mut ShellState, pipeline: &[Command], background
                 child.stdin(std::process::Stdio::from(out));
             } else if builtin_buffer.is_some() {
                 child.stdin(std::process::Stdio::piped());
+            } else if cmd.heredoc_content.is_some() {
+                // NEW: Force the pipeline child to wait for our heredoc pipe!
+                child.stdin(std::process::Stdio::piped());
             }
 
             if !is_last {
@@ -260,6 +272,7 @@ pub fn execute_pipeline(state: &mut ShellState, pipeline: &[Command], background
                 let file = open_file(err_file, cmd.append_stderr);
                 child.stderr(std::process::Stdio::from(file));
             }
+
             setup_child_signals(&mut child, cmd.merge_stderr);
             let mut spawned = child.spawn().expect("failed to spawn");
 
@@ -269,7 +282,12 @@ pub fn execute_pipeline(state: &mut ShellState, pipeline: &[Command], background
                     stdin.write_all(&buf).unwrap();
                 }
             }
-
+            // NEW: Feed heredoc output to child's stdin
+            else if let Some(content) = &cmd.heredoc_content {
+                if let Some(mut stdin) = spawned.stdin.take() {
+                    let _ = stdin.write_all(content.as_bytes());
+                }
+            }
             if !is_last {
                 previous_stdout = spawned.stdout.take();
             } else if background {

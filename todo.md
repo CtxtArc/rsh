@@ -11,7 +11,7 @@
 
 ## Advanced I/O
 [x] Support stream merging (2>&1 redirection)
-[ ] Implement here-docs (<< EOF) for multi-line string input
+[x] Implement here-docs (<< EOF) for multi-line string input
 
 ## add builtins
 [x] source builtin to reload a file

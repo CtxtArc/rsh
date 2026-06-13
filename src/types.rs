@@ -73,6 +73,7 @@ pub struct Command {
     pub stderr_file: Option<String>,
     pub append_stderr: bool,
     pub merge_stderr: bool,
+    pub heredoc_content: Option<String>,
 }
 
 impl Command {
@@ -88,12 +89,18 @@ impl Command {
         let mut stderr_file = None;
         let mut append_stderr = false;
         let mut merge_stderr = false;
+        let mut heredoc_content = None;
 
         let mut i = 0;
         while i < tokens.len() {
             match tokens[i].as_str() {
                 "<" if i + 1 < tokens.len() => {
                     stdin_file = Some(expand_word(state, &tokens[i + 1]));
+                    i += 1;
+                }
+                "<<" if i + 1 < tokens.len() => {
+                    // We assume the REPL packed the entire multi-line string into this one token!
+                    heredoc_content = Some(tokens[i + 1].clone());
                     i += 1;
                 }
                 ">" | "1>" if i + 1 < tokens.len() => {
@@ -165,6 +172,7 @@ impl Command {
             stderr_file,
             append_stderr,
             merge_stderr,
+            heredoc_content,
         }
     }
 
@@ -178,6 +186,7 @@ impl Command {
             stderr_file: None,
             append_stderr: false,
             merge_stderr: false,
+            heredoc_content: None,
         }
     }
 }

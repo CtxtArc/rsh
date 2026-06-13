@@ -15,6 +15,7 @@ pub enum Builtin {
     Fg(Option<usize>),
     Bg(Option<usize>),
     RegexMatch(String, String),
+    Source(String),
 }
 
 impl Builtin {
@@ -54,6 +55,7 @@ impl Builtin {
             "jobs" => Some(Builtin::Jobs),
             "fg" => Some(Builtin::Fg(args.first().and_then(|s| s.parse().ok()))),
             "bg" => Some(Builtin::Bg(args.first().and_then(|s| s.parse().ok()))),
+            "source" | "." => Some(Builtin::Source(args.first().cloned().unwrap_or_default())),
             _ => None,
         }
     }

@@ -118,7 +118,7 @@ fn main() {
 // ── Utilities ─────────────────────────────────────────────────────────────────
 
 /// Strip `#`-prefixed comment lines while preserving newlines for the parser.
-fn strip_comments(input: &str) -> String {
+pub fn strip_comments(input: &str) -> String {
     let mut out = String::new();
     for line in input.lines() {
         let trimmed = line.trim();

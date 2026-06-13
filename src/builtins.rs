@@ -1,5 +1,6 @@
 use crate::expand::find_in_path;
 use crate::state::{Job, JobStatus, ShellState};
+use crate::strip_comments;
 use crate::types::Builtin;
 use std::io::Write;
 
@@ -37,7 +38,17 @@ pub fn run_builtin<W: Write, E: Write>(
             std::env::set_var(key, value);
             true
         }
-
+        Builtin::Source(path) => match std::fs::read_to_string(&path) {
+            Ok(contents) => {
+                let cleaned = strip_comments(&contents);
+                let tokens = crate::tokenizer::tokenize(&cleaned);
+                crate::executor::evaluate_tokens(state, &tokens)
+            }
+            Err(e) => {
+                eprintln!("rsh: source: {}: {}", path, e);
+                false
+            }
+        },
         Builtin::Type(commands) => {
             for cmd in commands {
                 match cmd.as_str() {

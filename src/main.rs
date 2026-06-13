@@ -98,8 +98,7 @@ fn main() {
                 }
                 input_buffer.push_str(&line);
 
-                let cleaned_input = strip_comments(&input_buffer);
-                let tokens = tokenize(&cleaned_input);
+                let tokens = tokenize(&input_buffer);
                 if is_incomplete(&input_buffer, &tokens) {
                     continue; // Wait for the user to finish the block
                 }

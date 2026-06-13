@@ -1,5 +1,7 @@
 # rsh Development Todo List
 
+[x] proper escaping in tokenize
+
 ## UX & Polish
 [x] Implement TTY-aware output for ANSI color support (ls/grep compatibility)
 [x] Add Tab-completion for binaries and file paths using rustyline

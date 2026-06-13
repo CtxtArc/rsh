@@ -1,6 +1,3 @@
-/// Turn a raw input string into a list of shell tokens.
-/// Handles single/double quoting, backslash escapes, and subshell depth
-/// so spaces inside `$(...)` are not treated as delimiters.
 pub fn tokenize(input: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut current = String::new();
@@ -8,67 +5,101 @@ pub fn tokenize(input: &str) -> Vec<String> {
     let mut in_single = false;
     let mut in_double = false;
     let mut escaped = false;
-    let mut subshell_depth: usize = 0;
+    let mut cmd_subst_depth = 0;
+    let mut in_comment = false; // NEW: Tracks comment state
 
-    let chars: Vec<char> = input.chars().collect();
-    let mut i = 0;
-
-    while i < chars.len() {
-        let c = chars[i];
+    for c in input.chars() {
+        // 1. If we are in a comment, ignore everything until the newline
+        if in_comment {
+            if c == '\n' {
+                in_comment = false;
+                // A newline after a comment still acts as a statement separator!
+                if cmd_subst_depth == 0 {
+                    if let Some(last) = tokens.last() {
+                        if last != ";" && last != "&&" && last != "||" && last != "|" {
+                            tokens.push(";".to_string());
+                        }
+                    }
+                }
+            }
+            continue;
+        }
 
         if escaped {
             current.push(c);
             escaped = false;
-            i += 1;
             continue;
         }
 
-        match c {
-            '\\' => {
-                escaped = true;
-                current.push(c);
+        if c == '\\' && !in_single {
+            current.push(c);
+            escaped = true;
+            continue;
+        }
+
+        if c == '\'' && !in_double {
+            in_single = !in_single;
+            current.push(c);
+            continue;
+        }
+
+        if c == '"' && !in_single {
+            in_double = !in_double;
+            current.push(c);
+            continue;
+        }
+
+        if !in_single && !in_double {
+            if c == '(' && current.ends_with('$') {
+                cmd_subst_depth += 1;
+            } else if c == '(' && cmd_subst_depth > 0 {
+                cmd_subst_depth += 1;
+            } else if c == ')' && cmd_subst_depth > 0 {
+                cmd_subst_depth -= 1;
             }
-            '\'' if !in_double => {
-                in_single = !in_single;
-                current.push(c);
+
+            // Enter comment state
+            if c == '#' && current.is_empty() {
+                in_comment = true;
+                continue;
             }
-            '"' if !in_single => {
-                in_double = !in_double;
-                current.push(c);
-            }
-            '$' if !in_single => {
-                current.push(c);
-                if i + 1 < chars.len() && chars[i + 1] == '(' {
-                    current.push('(');
-                    subshell_depth += 1;
-                    i += 2;
-                    continue;
-                }
-            }
-            '(' if subshell_depth > 0 && !in_single => {
-                subshell_depth += 1;
-                current.push(c);
-            }
-            ')' if subshell_depth > 0 && !in_single => {
-                subshell_depth -= 1;
-                current.push(c);
-            }
-            // Token delimiters (only at top level, outside quotes)
-            ' ' | '\t' | '\n' | ';' if !in_single && !in_double && subshell_depth == 0 => {
+
+            // NEW: Translate Newlines into Semicolons
+            if c == '\n' && cmd_subst_depth == 0 {
                 if !current.is_empty() {
                     tokens.push(current.clone());
                     current.clear();
                 }
-                // Newlines and semicolons become explicit statement separators
-                if c == '\n' || c == ';' {
-                    if tokens.last().map(|s: &String| s.as_str()) != Some(";") {
+                // Prevent double semicolons or putting a semicolon after a pipe
+                if let Some(last) = tokens.last() {
+                    if last != ";" && last != "&&" && last != "||" && last != "|" {
                         tokens.push(";".to_string());
                     }
                 }
+                continue;
             }
-            _ => current.push(c),
+            if c == ';' && cmd_subst_depth == 0 {
+                if !current.is_empty() {
+                    tokens.push(current.clone());
+                    current.clear();
+                }
+                // Only push a semicolon if the last token isn't already one
+                if tokens.last().map(|s| s.as_str()) != Some(";") {
+                    tokens.push(";".to_string());
+                }
+                continue;
+            }
+            // Normal Whitespace
+            if c.is_whitespace() && cmd_subst_depth == 0 {
+                if !current.is_empty() {
+                    tokens.push(current.clone());
+                    current.clear();
+                }
+                continue;
+            }
         }
-        i += 1;
+
+        current.push(c);
     }
 
     if !current.is_empty() {
@@ -78,45 +109,66 @@ pub fn tokenize(input: &str) -> Vec<String> {
     tokens
 }
 
-/// Returns `true` when the user's input is structurally incomplete (open
-/// keyword, unclosed quote, trailing backslash, etc.) so the REPL can
-/// prompt for a continuation line instead of executing prematurely.
 pub fn is_incomplete(input: &str, tokens: &[String]) -> bool {
-    // 1. Unmatched block keywords
-    let mut depth: i32 = 0;
-    for t in tokens {
-        match t.as_str() {
-            "if" | "for" | "while" | "{" => depth += 1,
-            "fi" | "done" | "}" => depth -= 1,
-            _ => {}
+    // 1. Check for trailing pipes or logical operators
+    if let Some(last) = tokens.last() {
+        let s = last.as_str();
+        if s == "|" || s == "&&" || s == "||" {
+            return true;
         }
     }
-    if depth > 0 {
-        return true;
-    }
 
-    // 2. Unclosed quotes / subshells / trailing backslash
+    // 2. Check for unclosed quotes or command substitutions
     let mut in_single = false;
     let mut in_double = false;
     let mut escaped = false;
-    let mut paren_depth: i32 = 0;
+    let mut cmd_subst_depth = 0;
+    let mut last_char = '\0';
 
-    for (i, c) in input.chars().enumerate() {
-        let _ = i; // suppress unused warning
+    for c in input.chars() {
         if escaped {
             escaped = false;
+            last_char = c;
             continue;
         }
-        match c {
-            '\\' => escaped = true,
-            '\'' if !in_double => in_single = !in_single,
-            '"' if !in_single => in_double = !in_double,
-            '$' => {} // handled by the next char check below (we rely on tokenizer for this)
-            '(' if paren_depth > 0 && !in_single => paren_depth += 1,
-            ')' if paren_depth > 0 && !in_single => paren_depth -= 1,
+        if c == '\\' && !in_single {
+            escaped = true;
+            last_char = c;
+            continue;
+        }
+        if c == '\'' && !in_double {
+            in_single = !in_single;
+            last_char = c;
+            continue;
+        }
+        if c == '"' && !in_single {
+            in_double = !in_double;
+            last_char = c;
+            continue;
+        }
+
+        if !in_single && !in_double {
+            if c == '(' && last_char == '$' {
+                cmd_subst_depth += 1;
+            } else if c == '(' && cmd_subst_depth > 0 {
+                cmd_subst_depth += 1;
+            } else if c == ')' && cmd_subst_depth > 0 {
+                cmd_subst_depth -= 1;
+            }
+        }
+        last_char = c;
+    }
+
+    // 3. NEW: Check for unclosed AST control flow blocks!
+    let mut block_depth = 0;
+    for t in tokens {
+        match t.as_str() {
+            "if" | "for" | "while" | "{" | "(" => block_depth += 1,
+            "fi" | "done" | "}" | ")" => block_depth -= 1,
             _ => {}
         }
     }
 
-    in_single || in_double || paren_depth > 0 || escaped
+    // If ANY of these are true, the user needs to keep typing
+    in_single || in_double || escaped || cmd_subst_depth > 0 || block_depth > 0
 }

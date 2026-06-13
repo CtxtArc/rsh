@@ -102,6 +102,15 @@ pub fn format_prompt(ps1: &str) -> String {
                         chars.next();
                         prompt.push('\x1b');
                     }
+                    // \b: Custom rsh native Git branch detection!
+                    'b' => {
+                        chars.next();
+                        if let Some(branch) = get_git_branch() {
+                            // Format it however you like natively, e.g., "git:main"
+                            prompt.push_str("git:");
+                            prompt.push_str(&branch);
+                        }
+                    }
                     // \[ and \]: Non-printing character markers (CRITICAL for rustyline)
                     '[' => {
                         chars.next();
@@ -134,4 +143,22 @@ pub fn format_prompt(ps1: &str) -> String {
         }
     }
     prompt
+}
+fn get_git_branch() -> Option<String> {
+    use std::process::{Command, Stdio};
+
+    let output = Command::new("git")
+        .args(["branch", "--show-current"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null()) // Hide errors if not in a git repo
+        .output()
+        .ok()?;
+
+    if output.status.success() {
+        let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !branch.is_empty() {
+            return Some(branch);
+        }
+    }
+    None
 }

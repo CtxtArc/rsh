@@ -1,4 +1,5 @@
 mod builtins;
+mod completer;
 mod executor;
 mod expand;
 mod parser;
@@ -9,8 +10,10 @@ mod types;
 use std::path::PathBuf;
 
 use rustyline::error::ReadlineError;
-use rustyline::DefaultEditor;
+use rustyline::history::DefaultHistory;
+use rustyline::Editor;
 
+use completer::ShellCompleter;
 use executor::evaluate_tokens;
 use state::ShellState;
 use tokenizer::{is_incomplete, tokenize};
@@ -68,7 +71,12 @@ fn main() {
 
     // ── Interactive REPL ──────────────────────────────────────────────────────
     let history_file = PathBuf::from(&home_dir).join(".rsh_history");
-    let mut rl = DefaultEditor::new().expect("Failed to create readline editor");
+    let config = rustyline::Config::builder()
+        .completion_type(rustyline::CompletionType::List)
+        .build();
+    let mut rl: Editor<ShellCompleter, DefaultHistory> =
+        Editor::with_config(config).expect("Failed to create readline editor");
+    rl.set_helper(Some(ShellCompleter));
     let _ = rl.load_history(&history_file);
 
     let mut input_buffer = String::new();

@@ -21,9 +21,9 @@ pub struct Job {
 
 struct ShellState {
     aliases: HashMap<String, String>,
-    // --- STAGE 20: JOB CONTROL STATE ---
     jobs: Vec<Job>,
     job_id_counter: usize,
+    last_exit_status: i32,
 }
 
 impl ShellState {
@@ -32,6 +32,7 @@ impl ShellState {
             aliases: HashMap::new(),
             jobs: Vec::new(),
             job_id_counter: 1,
+            last_exit_status: 0,
         }
     }
 }
@@ -122,7 +123,7 @@ struct Command {
 }
 
 impl Command {
-    fn from_tokens(tokens: Vec<String>) -> Command {
+    fn from_tokens(state: &ShellState, tokens: Vec<String>) -> Command {
         if tokens.is_empty() {
             return Command {
                 command: String::new(),
@@ -147,20 +148,20 @@ impl Command {
             match tokens[i].as_str() {
                 "<" => {
                     if i + 1 < tokens.len() {
-                        stdin_file = Some(expand_word(&tokens[i + 1]));
+                        stdin_file = Some(expand_word(state, &tokens[i + 1]));
                         i += 1;
                     }
                 }
                 ">" | "1>" => {
                     if i + 1 < tokens.len() {
-                        stdout_file = Some(expand_word(&tokens[i + 1]));
+                        stdout_file = Some(expand_word(state, &tokens[i + 1]));
                         append_stdout = false;
                         i += 1;
                     }
                 }
                 ">>" | "1>>" => {
                     if i + 1 < tokens.len() {
-                        stdout_file = Some(expand_word(&tokens[i + 1]));
+                        stdout_file = Some(expand_word(state, &tokens[i + 1]));
                         append_stdout = true;
                         i += 1;
                     }
@@ -168,20 +169,20 @@ impl Command {
 
                 "2>" => {
                     if i + 1 < tokens.len() {
-                        stderr_file = Some(expand_word(&tokens[i + 1]));
+                        stderr_file = Some(expand_word(state, &tokens[i + 1]));
                         append_stderr = false;
                         i += 1;
                     }
                 }
                 "2>>" => {
                     if i + 1 < tokens.len() {
-                        stderr_file = Some(expand_word(&tokens[i + 1]));
+                        stderr_file = Some(expand_word(state, &tokens[i + 1]));
                         append_stderr = true;
                         i += 1;
                     }
                 }
                 _ => {
-                    let expanded = expand_word(&tokens[i]);
+                    let expanded = expand_word(state, &tokens[i]);
                     let mut globbed = expand_glob(&expanded);
                     args.append(&mut globbed);
                 }
@@ -284,7 +285,7 @@ fn expand_glob(word: &str) -> Vec<String> {
     }
 }
 
-pub fn expand_word(input: &str) -> String {
+pub fn expand_word(state: &ShellState, input: &str) -> String {
     let mut result = String::new();
     let mut in_single = false;
     let mut in_double = false;
@@ -312,19 +313,18 @@ pub fn expand_word(input: &str) -> String {
                 }
             }
             '\'' if !in_double => {
-                in_single = !in_single; // Skip adding the quote to the result
+                in_single = !in_single;
             }
             '"' if !in_single => {
-                in_double = !in_double; // Skip adding the quote to the result
+                in_double = !in_double;
             }
             '$' if !in_single => {
-                // --- NEW: COMMAND SUBSTITUTION $(...) ---
+                // 1. COMMAND SUBSTITUTION $(...)
                 if i + 1 < chars.len() && chars[i + 1] == '(' {
                     i += 2; // Skip '$' and '('
                     let mut sub_cmd = String::new();
                     let mut paren_count = 1;
 
-                    // Extract the inner command, respecting nested parentheses
                     while i < chars.len() && paren_count > 0 {
                         if chars[i] == '(' {
                             paren_count += 1;
@@ -338,7 +338,6 @@ pub fn expand_word(input: &str) -> String {
                         i += 1;
                     }
 
-                    // Execute the subshell by calling our own binary!
                     if let Ok(exe) = std::env::current_exe() {
                         if let Ok(output) = std::process::Command::new(exe)
                             .arg("-c")
@@ -346,14 +345,52 @@ pub fn expand_word(input: &str) -> String {
                             .output()
                         {
                             let out_str = String::from_utf8_lossy(&output.stdout);
-                            // POSIX rules: command substitution strips trailing newlines
                             result.push_str(out_str.trim_end_matches('\n'));
                         }
                     }
                     continue;
                 }
 
-                // --- EXISTING: VARIABLE EXPANSION $VAR ---
+                // 2. EXIT STATUS $?
+                if i + 1 < chars.len() && chars[i + 1] == '?' {
+                    result.push_str(&state.last_exit_status.to_string());
+                    i += 2;
+                    continue;
+                }
+
+                // 3. BRACE EXPANSION ${VAR:-default}
+                if i + 1 < chars.len() && chars[i + 1] == '{' {
+                    i += 2; // Skip '${'
+                    let mut inside_brace = String::new();
+                    while i < chars.len() && chars[i] != '}' {
+                        inside_brace.push(chars[i]);
+                        i += 1;
+                    }
+                    if i < chars.len() && chars[i] == '}' {
+                        i += 1; // Skip '}'
+                    }
+
+                    // Parse the default value fallback ":-"
+                    if let Some((var_name, default_val)) = inside_brace.split_once(":-") {
+                        if let Ok(val) = std::env::var(var_name) {
+                            if !val.is_empty() {
+                                result.push_str(&val);
+                            } else {
+                                result.push_str(default_val);
+                            }
+                        } else {
+                            result.push_str(default_val);
+                        }
+                    } else {
+                        // Standard ${VAR} with no default
+                        if let Ok(val) = std::env::var(&inside_brace) {
+                            result.push_str(&val);
+                        }
+                    }
+                    continue;
+                }
+
+                // 4. STANDARD VARIABLE EXPANSION $VAR
                 let mut var_name = String::new();
                 i += 1; // Skip '$'
                 while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
@@ -361,7 +398,6 @@ pub fn expand_word(input: &str) -> String {
                     i += 1;
                 }
 
-                // Expand from the current environment
                 if let Ok(val) = std::env::var(&var_name) {
                     result.push_str(&val);
                 }
@@ -376,14 +412,15 @@ pub fn expand_word(input: &str) -> String {
 
     result
 }
-fn parse_logic(tokens: &[String]) -> Vec<LogicalGroup> {
+
+fn parse_logic(state: &ShellState, tokens: &[String]) -> Vec<LogicalGroup> {
     let mut groups = Vec::new();
     let mut current_tokens = Vec::new();
 
     for token in tokens {
         match token.as_str() {
             "&&" => {
-                let pipeline = parse_pipeline_from_tokens(&current_tokens);
+                let pipeline = parse_pipeline_from_tokens(state, &current_tokens);
                 groups.push(LogicalGroup {
                     pipeline,
                     next_op: Operator::And,
@@ -391,7 +428,7 @@ fn parse_logic(tokens: &[String]) -> Vec<LogicalGroup> {
                 current_tokens.clear();
             }
             "||" => {
-                let pipeline = parse_pipeline_from_tokens(&current_tokens);
+                let pipeline = parse_pipeline_from_tokens(state, &current_tokens);
                 groups.push(LogicalGroup {
                     pipeline,
                     next_op: Operator::Or,
@@ -399,7 +436,7 @@ fn parse_logic(tokens: &[String]) -> Vec<LogicalGroup> {
                 current_tokens.clear();
             }
             "&" => {
-                let pipeline = parse_pipeline_from_tokens(&current_tokens);
+                let pipeline = parse_pipeline_from_tokens(state, &current_tokens);
                 groups.push(LogicalGroup {
                     pipeline,
                     next_op: Operator::Async,
@@ -411,7 +448,7 @@ fn parse_logic(tokens: &[String]) -> Vec<LogicalGroup> {
     }
 
     if !current_tokens.is_empty() {
-        let pipeline = parse_pipeline_from_tokens(&current_tokens);
+        let pipeline = parse_pipeline_from_tokens(state, &current_tokens);
         groups.push(LogicalGroup {
             pipeline,
             next_op: Operator::None,
@@ -421,19 +458,19 @@ fn parse_logic(tokens: &[String]) -> Vec<LogicalGroup> {
     groups
 }
 
-fn parse_pipeline_from_tokens(tokens: &[String]) -> Vec<Command> {
+fn parse_pipeline_from_tokens(state: &ShellState, tokens: &[String]) -> Vec<Command> {
     let mut commands = Vec::new();
     let mut current_tokens = Vec::new();
 
     for token in tokens {
         if token == "|" {
-            commands.push(Command::from_tokens(current_tokens.clone()));
+            commands.push(Command::from_tokens(state, current_tokens.clone()));
             current_tokens.clear();
         } else {
             current_tokens.push(token.clone());
         }
     }
-    commands.push(Command::from_tokens(current_tokens));
+    commands.push(Command::from_tokens(state, current_tokens));
     commands
 }
 
@@ -455,7 +492,7 @@ fn evaluate_tokens(state: &mut ShellState, tokens: &[String]) -> bool {
             let mut last_status = true;
 
             for item in items {
-                std::env::set_var(var_name, expand_word(item));
+                std::env::set_var(var_name, expand_word(state, item));
                 last_status = evaluate_tokens(state, inner_commands);
             }
 
@@ -466,7 +503,7 @@ fn evaluate_tokens(state: &mut ShellState, tokens: &[String]) -> bool {
         }
     }
 
-    let logical_groups = parse_logic(tokens);
+    let logical_groups = parse_logic(state, tokens);
     let mut skip = false;
     let mut last_success = true;
 
@@ -648,7 +685,7 @@ fn execute_single(state: &mut ShellState, expr: &Command, background: bool) -> b
 
     // Pass the expanded cmd_name and cmd_args to Builtin::parse
     if let Some(builtin) = Builtin::parse(&cmd_name, &cmd_args) {
-        match builtin {
+        let builtin_success = match builtin {
             Builtin::Exit(code) => std::process::exit(code),
             Builtin::Echo(args) => {
                 writeln!(output, "{}", args.join(" ")).unwrap();
@@ -657,9 +694,8 @@ fn execute_single(state: &mut ShellState, expr: &Command, background: bool) -> b
             Builtin::Type(commands) => {
                 for cmd in commands {
                     match cmd.as_str() {
-                        "echo" | "exit" | "type" | "cd" | "pwd" | "export" | "alias" => {
-                            writeln!(output, "{} is a shell builtin", cmd).unwrap()
-                        }
+                        "echo" | "exit" | "type" | "cd" | "pwd" | "export" | "alias" | "jobs"
+                        | "fg" | "bg" => writeln!(output, "{} is a shell builtin", cmd).unwrap(),
                         _ => match find_in_path(&cmd) {
                             Some(full_cmd) => {
                                 writeln!(output, "{} is {}", cmd, full_cmd.display()).unwrap()
@@ -678,13 +714,11 @@ fn execute_single(state: &mut ShellState, expr: &Command, background: bool) -> b
                 std::env::set_var(key, value);
                 true
             }
-            // Print out all tracked jobs
             Builtin::Jobs => {
-                // Clean up dead background jobs first by checking status non-blockingly
                 state.jobs.retain(|job| {
                     let mut status = 0;
                     let res = unsafe { libc::waitpid(job.pgid, &mut status, libc::WNOHANG) };
-                    res == 0 // Keep it if it hasn't exited yet
+                    res == 0
                 });
 
                 for job in &state.jobs {
@@ -696,24 +730,16 @@ fn execute_single(state: &mut ShellState, expr: &Command, background: bool) -> b
                 }
                 true
             }
-
-            // Bring a background/stopped job to the foreground
             Builtin::Fg(target_id) => {
-                let id = target_id.unwrap_or(1); // Default to first job if not specified
+                let id = target_id.unwrap_or(1);
                 if let Some(pos) = state.jobs.iter().position(|j| j.id == id) {
-                    let job = state.jobs.remove(pos); // Pull it out of background tracking
-
+                    let job = state.jobs.remove(pos);
                     println!("{}", job.command);
                     unsafe {
-                        // If it was stopped, wake it back up with a continue signal
                         libc::kill(-job.pgid, libc::SIGCONT);
-                        // Hand over terminal control
                         libc::tcsetpgrp(libc::STDIN_FILENO, job.pgid);
-
                         let mut status = 0;
                         libc::waitpid(job.pgid, &mut status, libc::WUNTRACED);
-
-                        // Reclaim terminal control
                         libc::tcsetpgrp(libc::STDIN_FILENO, libc::getpid());
 
                         if libc::WIFSTOPPED(status) {
@@ -729,14 +755,11 @@ fn execute_single(state: &mut ShellState, expr: &Command, background: bool) -> b
                 }
                 true
             }
-
-            // Resume a stopped job silently in the background
             Builtin::Bg(target_id) => {
                 let id = target_id.unwrap_or(1);
                 if let Some(job) = state.jobs.iter_mut().find(|j| j.id == id) {
                     if job.status == JobStatus::Stopped {
                         unsafe {
-                            // Wake up the entire process group in the background
                             libc::kill(-job.pgid, libc::SIGCONT);
                         }
                         job.status = JobStatus::Running;
@@ -754,7 +777,6 @@ fn execute_single(state: &mut ShellState, expr: &Command, background: bool) -> b
                     false
                 }
             },
-            // NEW: The Alias Builtin Logic
             Builtin::Alias(args) => {
                 if args.is_empty() {
                     for (k, v) in &state.aliases {
@@ -770,7 +792,10 @@ fn execute_single(state: &mut ShellState, expr: &Command, background: bool) -> b
                 }
                 true
             }
-        }
+        };
+        // Save the builtin's exit status!
+        state.last_exit_status = if builtin_success { 0 } else { 1 };
+        builtin_success
     } else {
         if let Some(full_command) = find_in_path(&cmd_name) {
             let mut child = std::process::Command::new(full_command);
@@ -782,6 +807,7 @@ fn execute_single(state: &mut ShellState, expr: &Command, background: bool) -> b
                     child.stdin(std::process::Stdio::from(file));
                 } else {
                     eprintln!("{}: No such file or directory", in_file);
+                    state.last_exit_status = 1;
                     return false;
                 }
             }
@@ -789,13 +815,13 @@ fn execute_single(state: &mut ShellState, expr: &Command, background: bool) -> b
             // --- STANDARD OUTPUT REDIRECTION (>, >>) ---
             if let Some(out_file) = &expr.stdout_file {
                 let file = if expr.append_stdout {
-                    std::fs::OpenOptions::new()
+                    OpenOptions::new()
                         .create(true)
                         .append(true)
                         .open(out_file)
                         .unwrap()
                 } else {
-                    std::fs::File::create(out_file).unwrap()
+                    File::create(out_file).unwrap()
                 };
                 child.stdout(std::process::Stdio::from(file));
             }
@@ -803,31 +829,25 @@ fn execute_single(state: &mut ShellState, expr: &Command, background: bool) -> b
             // --- STANDARD ERROR REDIRECTION (2>, 2>>) ---
             if let Some(err_file) = &expr.stderr_file {
                 let file = if expr.append_stderr {
-                    std::fs::OpenOptions::new()
+                    OpenOptions::new()
                         .create(true)
                         .append(true)
                         .open(err_file)
                         .unwrap()
                 } else {
-                    std::fs::File::create(err_file).unwrap()
+                    File::create(err_file).unwrap()
                 };
                 child.stderr(std::process::Stdio::from(file));
-            } // --- PROCESS ISOLATION ---
-              // Force the child process to start its own isolated process group
-              // so signals like Ctrl-C and Ctrl-Z don't hit the parent shell!
+            }
+
             unsafe {
                 child.pre_exec(|| {
-                    // Force the child into its own process group
                     libc::setpgid(0, 0);
-
-                    // Strip the child of the shell's signal immunities!
-                    // This allows the child to be stopped (Ctrl-Z) and killed (Ctrl-C).
                     libc::signal(libc::SIGINT, libc::SIG_DFL);
                     libc::signal(libc::SIGQUIT, libc::SIG_DFL);
                     libc::signal(libc::SIGTSTP, libc::SIG_DFL);
                     libc::signal(libc::SIGTTIN, libc::SIG_DFL);
                     libc::signal(libc::SIGTTOU, libc::SIG_DFL);
-
                     Ok(())
                 });
             }
@@ -835,11 +855,9 @@ fn execute_single(state: &mut ShellState, expr: &Command, background: bool) -> b
             match child.spawn() {
                 Ok(spawned) => {
                     let pid = spawned.id() as i32;
-                    // Because we ran setpgid(0,0), the child's PID becomes its PGID
                     let pgid = pid;
 
                     if background {
-                        // Save to job list as running in background
                         let job_id = state.job_id_counter;
                         state.jobs.push(Job {
                             id: job_id,
@@ -849,29 +867,22 @@ fn execute_single(state: &mut ShellState, expr: &Command, background: bool) -> b
                         });
                         println!("[{}] {}", job_id, pid);
                         state.job_id_counter += 1;
+                        state.last_exit_status = 0; // Background jobs don't block
                         true
                     } else {
-                        // --- FOREGROUND TERMINAL HANDSHAKE ---
                         unsafe {
-                            // Give terminal keyboard control to the child's process group
                             libc::tcsetpgrp(libc::STDIN_FILENO, pgid);
                         }
 
-                        // Wait for the child, monitoring if it finishes OR gets stopped
                         let mut status: libc::c_int = 0;
                         unsafe {
                             libc::waitpid(pgid, &mut status, libc::WUNTRACED);
                         }
-
-                        // --- RECLAIM TERMINAL CONTROL ---
                         unsafe {
-                            // Immediately take keyboard control back for the shell
                             libc::tcsetpgrp(libc::STDIN_FILENO, libc::getpid());
                         }
 
-                        // Analyze what happened to the child process
                         if libc::WIFSTOPPED(status) {
-                            // The user pressed Ctrl-Z! The process is suspended.
                             let job_id = state.job_id_counter;
                             state.jobs.push(Job {
                                 id: job_id,
@@ -881,20 +892,29 @@ fn execute_single(state: &mut ShellState, expr: &Command, background: bool) -> b
                             });
                             println!("\n[{}] + Stopped          {}", job_id, cmd_name);
                             state.job_id_counter += 1;
+
+                            // Typical shell behavior for SIGTSTP
+                            state.last_exit_status = 148;
                             true
                         } else {
-                            // Process finished normally or was killed by Ctrl-C
-                            libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0
+                            if libc::WIFEXITED(status) {
+                                state.last_exit_status = libc::WEXITSTATUS(status);
+                            } else {
+                                state.last_exit_status = 1;
+                            }
+                            state.last_exit_status == 0
                         }
                     }
                 }
                 Err(e) => {
                     eprintln!("{}: {}", cmd_name, e);
+                    state.last_exit_status = 126;
                     false
                 }
             }
         } else {
             println!("{}: command not found", cmd_name);
+            state.last_exit_status = 127;
             false
         }
     }
@@ -908,7 +928,6 @@ fn execute_pipeline(state: &mut ShellState, pipeline: &[Command], background: bo
     for (i, cmd) in pipeline.iter().enumerate() {
         let is_last = i == pipeline.len() - 1;
 
-        // --- STAGE 17: ALIAS EXPANSION ---
         let mut cmd_name = cmd.command.clone();
         let mut cmd_args = cmd.args.clone();
 
@@ -931,7 +950,8 @@ fn execute_pipeline(state: &mut ShellState, pipeline: &[Command], background: bo
                 Builtin::Type(commands) => {
                     for type_cmd in commands {
                         match type_cmd.as_str() {
-                            "echo" | "exit" | "type" | "cd" | "pwd" | "export" | "alias" => {
+                            "echo" | "exit" | "type" | "cd" | "pwd" | "export" | "alias"
+                            | "jobs" | "fg" | "bg" => {
                                 writeln!(output, "{} is a shell builtin", type_cmd).unwrap()
                             }
                             _ => match find_in_path(&type_cmd) {
@@ -958,16 +978,12 @@ fn execute_pipeline(state: &mut ShellState, pipeline: &[Command], background: bo
                         }
                     }
                 }
-                Builtin::Cd(_) | Builtin::Exit(_) | Builtin::Export(_, _) => {}
-
                 Builtin::Jobs => {
-                    // Clean up dead jobs non-blockingly
                     state.jobs.retain(|job| {
                         let mut status = 0;
                         let res = unsafe { libc::waitpid(job.pgid, &mut status, libc::WNOHANG) };
                         res == 0
                     });
-
                     for job in &state.jobs {
                         let status_str = match job.status {
                             JobStatus::Running => "Running",
@@ -978,14 +994,14 @@ fn execute_pipeline(state: &mut ShellState, pipeline: &[Command], background: bo
                     }
                 }
                 Builtin::Fg(_) | Builtin::Bg(_) => {
-                    // fg and bg require raw terminal control, which messes up pipelines.
-                    // We just print an error if they try to pipe them.
                     writeln!(output, "rsh: fg/bg not supported inside pipelines").unwrap();
                 }
+                Builtin::Cd(_) | Builtin::Exit(_) | Builtin::Export(_, _) => {}
             }
 
             if is_last {
                 std::io::stdout().write_all(&output).unwrap();
+                state.last_exit_status = 0;
                 final_success = true;
             } else {
                 builtin_buffer = Some(output);
@@ -1032,13 +1048,17 @@ fn execute_pipeline(state: &mut ShellState, pipeline: &[Command], background: bo
                 } else {
                     if background {
                         println!("[1] {}", spawned.id());
+                        state.last_exit_status = 0;
                         final_success = true;
                     } else {
-                        final_success = spawned.wait().map(|s| s.success()).unwrap_or(false);
+                        let status = spawned.wait().map(|s| s.code().unwrap_or(1)).unwrap_or(1);
+                        state.last_exit_status = status;
+                        final_success = status == 0;
                     }
                 }
             } else {
                 println!("{}: command not found", cmd_name);
+                state.last_exit_status = 127;
                 return false;
             }
         }

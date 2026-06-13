@@ -1,0 +1,6 @@
+
+lets do Deep Parameter and Arithmetic Expansion, lets have fun with it, make it our own.
+Scripting, Control Flow, and Functions
+advanced File Descriptor Routing
+
+

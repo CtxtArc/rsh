@@ -72,6 +72,7 @@ pub struct Command {
     pub append_stdout: bool,
     pub stderr_file: Option<String>,
     pub append_stderr: bool,
+    pub merge_stderr: bool,
 }
 
 impl Command {
@@ -86,6 +87,7 @@ impl Command {
         let mut append_stdout = false;
         let mut stderr_file = None;
         let mut append_stderr = false;
+        let mut merge_stderr = false;
 
         let mut i = 0;
         while i < tokens.len() {
@@ -113,6 +115,9 @@ impl Command {
                     stderr_file = Some(expand_word(state, &tokens[i + 1]));
                     append_stderr = true;
                     i += 1;
+                }
+                "2>&1" => {
+                    merge_stderr = true;
                 }
                 _ => {
                     let expanded = expand_word(state, &tokens[i]);
@@ -159,6 +164,7 @@ impl Command {
             append_stdout,
             stderr_file,
             append_stderr,
+            merge_stderr,
         }
     }
 
@@ -171,6 +177,7 @@ impl Command {
             append_stdout: false,
             stderr_file: None,
             append_stderr: false,
+            merge_stderr: false,
         }
     }
 }

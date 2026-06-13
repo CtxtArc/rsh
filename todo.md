@@ -10,7 +10,7 @@
 [x] add Git branch awareness for PS1
 
 ## Advanced I/O
-[ ] Support stream merging (2>&1 redirection)
+[x] Support stream merging (2>&1 redirection)
 [ ] Implement here-docs (<< EOF) for multi-line string input
 
 ## add builtins

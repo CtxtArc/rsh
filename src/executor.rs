@@ -166,7 +166,7 @@ pub fn execute_single(state: &mut ShellState, cmd: &Command, background: bool) -
         cmd.append_stderr,
     );
 
-    setup_child_signals(&mut child);
+    setup_child_signals(&mut child, cmd.merge_stderr);
 
     match child.spawn() {
         Err(e) => {
@@ -260,7 +260,7 @@ pub fn execute_pipeline(state: &mut ShellState, pipeline: &[Command], background
                 let file = open_file(err_file, cmd.append_stderr);
                 child.stderr(std::process::Stdio::from(file));
             }
-
+            setup_child_signals(&mut child, cmd.merge_stderr);
             let mut spawned = child.spawn().expect("failed to spawn");
 
             // Feed builtin output to child's stdin
@@ -342,15 +342,26 @@ fn attach_output_redirects(
     }
 }
 
-fn setup_child_signals(child: &mut std::process::Command) {
+fn setup_child_signals(child: &mut std::process::Command, merge_stderr: bool) {
     unsafe {
-        child.pre_exec(|| {
+        // We use 'move' here so the closure takes ownership of the boolean
+        child.pre_exec(move || {
             libc::setpgid(0, 0);
             libc::signal(libc::SIGINT, libc::SIG_DFL);
             libc::signal(libc::SIGQUIT, libc::SIG_DFL);
             libc::signal(libc::SIGTSTP, libc::SIG_DFL);
             libc::signal(libc::SIGTTIN, libc::SIG_DFL);
             libc::signal(libc::SIGTTOU, libc::SIG_DFL);
+
+            // NEW: The magic stream merge!
+            if merge_stderr {
+                // Duplicate FD 1 (stdout) into FD 2 (stderr)
+                if libc::dup2(libc::STDOUT_FILENO, libc::STDERR_FILENO) < 0 {
+                    eprintln!("rsh: failed to merge stderr into stdout");
+                    libc::_exit(1);
+                }
+            }
+
             Ok(())
         });
     }

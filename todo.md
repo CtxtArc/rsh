@@ -16,3 +16,4 @@
 ## add builtins
 [x] source builtin to reload a file
 [ ] Native `readjson` builtin (Parse JSON directly into shell variables)
+[ ] Native operators (eg. -f -ne -z ..)

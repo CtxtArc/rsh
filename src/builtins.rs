@@ -39,8 +39,8 @@ pub fn run_builtin<W: Write, E: Write>(
             };
 
             // 2. Attempt the system call
-            if let Err(e) = std::env::set_current_dir(&target) {
-                eprintln!("rsh: cd: {}: {}", target, e);
+            if let Err(_) = std::env::set_current_dir(&target) {
+                let _ = writeln!(err_output, "rsh: cd: {}: No such file or directory", target);
                 false
             } else {
                 true

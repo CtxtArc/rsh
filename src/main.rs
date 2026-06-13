@@ -319,8 +319,29 @@ pub fn expand_word(state: &ShellState, input: &str) -> String {
                 in_double = !in_double;
             }
             '$' if !in_single => {
+                // --- NEW: ARITHMETIC EXPANSION $((...)) ---
+                if i + 2 < chars.len() && chars[i + 1] == '(' && chars[i + 2] == '(' {
+                    i += 3; // Skip '$(('
+                    let mut math_expr = String::new();
+
+                    // Keep reading until we hit the double closing parenthesis '))'
+                    while i + 1 < chars.len() && !(chars[i] == ')' && chars[i + 1] == ')') {
+                        math_expr.push(chars[i]);
+                        i += 1;
+                    }
+                    i += 2; // Skip '))'
+
+                    // Evaluate and append!
+                    match eval_math(&math_expr) {
+                        Ok(num) => result.push_str(&num.to_string()),
+                        Err(e) => eprintln!("rsh: math error: {}", e),
+                    }
+                    continue;
+                }
+
                 // 1. COMMAND SUBSTITUTION $(...)
                 if i + 1 < chars.len() && chars[i + 1] == '(' {
+                    // ... rest of your code ...
                     i += 2; // Skip '$' and '('
                     let mut sub_cmd = String::new();
                     let mut paren_count = 1;
@@ -1150,4 +1171,96 @@ pub fn tokenize(input: &str) -> Vec<String> {
     }
 
     tokens
+}
+fn eval_math(expr: &str) -> Result<i64, String> {
+    let mut tokens = Vec::new();
+    let chars: Vec<char> = expr.chars().filter(|c| !c.is_whitespace()).collect();
+    let mut i = 0;
+
+    // Phase 1: Lexer
+    while i < chars.len() {
+        match chars[i] {
+            '+' | '-' | '*' | '/' | '(' | ')' => {
+                tokens.push(chars[i].to_string());
+                i += 1;
+            }
+            '0'..='9' => {
+                let mut num = String::new();
+                while i < chars.len() && chars[i].is_ascii_digit() {
+                    num.push(chars[i]);
+                    i += 1;
+                }
+                tokens.push(num);
+            }
+            _ => return Err(format!("Invalid math char: {}", chars[i])),
+        }
+    }
+
+    // Phase 2: Shunting-Yard (Infix to Postfix)
+    let mut rpn = Vec::new();
+    let mut ops: Vec<String> = Vec::new();
+
+    let precedence = |op: &str| -> i32 {
+        match op {
+            "+" | "-" => 1,
+            "*" | "/" => 2,
+            _ => 0,
+        }
+    };
+
+    for token in tokens {
+        if token.parse::<i64>().is_ok() {
+            rpn.push(token);
+        } else if token == "(" {
+            ops.push(token);
+        } else if token == ")" {
+            while let Some(op) = ops.pop() {
+                if op == "(" {
+                    break;
+                }
+                rpn.push(op);
+            }
+        } else {
+            while let Some(top_op) = ops.last() {
+                if precedence(top_op) >= precedence(&token) {
+                    rpn.push(ops.pop().unwrap());
+                } else {
+                    break;
+                }
+            }
+            ops.push(token);
+        }
+    }
+    while let Some(op) = ops.pop() {
+        if op == "(" {
+            return Err("Mismatched parentheses".to_string());
+        }
+        rpn.push(op);
+    }
+
+    // Phase 3: Stack Machine Evaluator
+    let mut stack: Vec<i64> = Vec::new();
+    for token in rpn {
+        if let Ok(num) = token.parse::<i64>() {
+            stack.push(num);
+        } else {
+            let b = stack.pop().ok_or("Invalid math expression")?;
+            let a = stack.pop().ok_or("Invalid math expression")?;
+            let res = match token.as_str() {
+                "+" => a + b,
+                "-" => a - b,
+                "*" => a * b,
+                "/" => {
+                    if b == 0 {
+                        return Err("Division by zero".to_string());
+                    }
+                    a / b
+                }
+                _ => return Err("Unknown operator".to_string()),
+            };
+            stack.push(res);
+        }
+    }
+
+    stack.pop().ok_or("Empty expression".to_string())
 }

@@ -25,7 +25,7 @@ Unlike simple command-wrappers, `rsh` is a core systems utility that interacts d
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/rsh
+git clone https://github.com/CtxtArc/rsh
 cd rsh
 
 # Install globally to ~/.cargo/bin
@@ -39,7 +39,7 @@ cargo install --path .
 
 ```bash
 # Run a script directly
-./deploy.rsh
+./your_script.rsh
 
 # Or run a command string
 rsh -c "for X in 1 2 3 ; do echo $X ; done"
@@ -51,3 +51,12 @@ rsh -c "for X in 1 2 3 ; do echo $X ; done"
 Most shells delegate complex text processing to external binaries (`grep`, `sed`, `awk`). `rsh` is designed for speed and modularity—by keeping these features native to the shell process, it avoids the overhead of context switching and process forking, making it exceptionally fast for complex automation tasks.
 
 
+src/
+├── main.rs          # Entry point, REPL loop
+├── state.rs         # ShellState, Job, JobStatus
+├── types.rs         # Command, ASTNode, Operator, LogicalGroup, Builtin
+├── tokenizer.rs     # tokenize(), is_incomplete()
+├── parser.rs        # parse_ast(), parse_logic(), parse_pipeline_from_tokens(), split_statements()
+├── executor.rs      # evaluate_ast(), evaluate_tokens(), execute_single(), execute_pipeline()
+├── builtins.rs      # Builtin::parse() + all builtin implementations
+└── expand.rs        # expand_word(), expand_glob(), eval_math(), match_pattern(), find_in_path()

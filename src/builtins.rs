@@ -1,8 +1,13 @@
-use crate::expand::find_in_path;
+use crate::expand::{find_in_path, is_tty};
 use crate::state::{Job, JobStatus, ShellState};
 use crate::strip_comments;
 use crate::types::Builtin;
 use std::io::Write;
+
+// ANSI color codes — only used when stdout is a real TTY
+const BOLD_GREEN: &str = "\x1b[1;32m";
+const BOLD_YELLOW: &str = "\x1b[1;33m";
+const RESET: &str = "\x1b[0m";
 
 /// Execute a builtin, writing stdout to `output` and stderr to `err_output`.
 /// Returns `Some(bool)` on success/failure, `None` if the builtin is not
@@ -38,26 +43,36 @@ pub fn run_builtin<W: Write, E: Write>(
             std::env::set_var(key, value);
             true
         }
-        Builtin::Source(path) => match std::fs::read_to_string(&path) {
-            Ok(contents) => {
-                let cleaned = strip_comments(&contents);
-                let tokens = crate::tokenizer::tokenize(&cleaned);
-                crate::executor::evaluate_tokens(state, &tokens)
-            }
-            Err(e) => {
-                eprintln!("rsh: source: {}: {}", path, e);
-                false
-            }
-        },
+
         Builtin::Type(commands) => {
+            let color = is_tty(libc::STDOUT_FILENO);
             for cmd in commands {
                 match cmd.as_str() {
                     "echo" | "exit" | "type" | "cd" | "pwd" | "export" | "alias" | "jobs"
-                    | "fg" | "bg" => {
-                        writeln!(output, "{} is a shell builtin", cmd).unwrap();
+                    | "fg" | "bg" | "source" => {
+                        if color {
+                            writeln!(output, "{} is {}shell builtin{}", cmd, BOLD_GREEN, RESET)
+                                .unwrap();
+                        } else {
+                            writeln!(output, "{} is a shell builtin", cmd).unwrap();
+                        }
                     }
                     _ => match find_in_path(&cmd) {
-                        Some(p) => writeln!(output, "{} is {}", cmd, p.display()).unwrap(),
+                        Some(p) => {
+                            if color {
+                                writeln!(
+                                    output,
+                                    "{} is {}{}{}",
+                                    cmd,
+                                    BOLD_YELLOW,
+                                    p.display(),
+                                    RESET
+                                )
+                                .unwrap();
+                            } else {
+                                writeln!(output, "{} is {}", cmd, p.display()).unwrap();
+                            }
+                        }
                         None => writeln!(output, "{}: not found", cmd).unwrap(),
                     },
                 }
@@ -82,15 +97,27 @@ pub fn run_builtin<W: Write, E: Write>(
         }
 
         Builtin::Jobs => {
-            // Reap finished jobs first
+            let color = is_tty(libc::STDOUT_FILENO);
             state.jobs.retain(|job| {
                 let mut status = 0;
                 unsafe { libc::waitpid(job.pgid, &mut status, libc::WNOHANG) == 0 }
             });
             for job in &state.jobs {
                 let status_str = match job.status {
-                    JobStatus::Running => "Running",
-                    JobStatus::Stopped => "Stopped",
+                    JobStatus::Running => {
+                        if color {
+                            format!("{}Running{}", BOLD_GREEN, RESET)
+                        } else {
+                            "Running".to_string()
+                        }
+                    }
+                    JobStatus::Stopped => {
+                        if color {
+                            format!("{}Stopped{}", BOLD_YELLOW, RESET)
+                        } else {
+                            "Stopped".to_string()
+                        }
+                    }
                 };
                 writeln!(output, "[{}]  {}    {}", job.id, status_str, job.command).unwrap();
             }
@@ -143,6 +170,18 @@ pub fn run_builtin<W: Write, E: Write>(
             Ok(re) => re.is_match(&text),
             Err(e) => {
                 eprintln!("rsh: regex syntax error: {}", e);
+                false
+            }
+        },
+
+        Builtin::Source(path) => match std::fs::read_to_string(&path) {
+            Ok(contents) => {
+                let cleaned = strip_comments(&contents);
+                let tokens = crate::tokenizer::tokenize(&cleaned);
+                crate::executor::evaluate_tokens(state, &tokens)
+            }
+            Err(e) => {
+                eprintln!("rsh: source: {}: {}", path, e);
                 false
             }
         },

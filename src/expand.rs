@@ -295,3 +295,6 @@ pub fn eval_math(expr: &str) -> Result<i64, String> {
 
     stack.pop().ok_or("Empty expression".to_string())
 }
+pub fn is_tty(fd: libc::c_int) -> bool {
+    unsafe { libc::isatty(fd) == 1 }
+}

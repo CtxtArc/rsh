@@ -1,12 +1,11 @@
-use std::fs::{File, OpenOptions};
-use std::io::Write;
-use std::os::unix::process::CommandExt;
-
 use crate::builtins::run_builtin;
 use crate::expand::{expand_word, find_in_path};
 use crate::parser::{parse_ast, parse_pipeline_from_tokens};
 use crate::state::{Job, JobStatus, ShellState};
 use crate::types::{ASTNode, Builtin, Command};
+use std::fs::{File, OpenOptions};
+use std::io::Write;
+use std::os::unix::process::CommandExt;
 
 // ── Top-level entry point ─────────────────────────────────────────────────────
 

@@ -1,7 +1,7 @@
 # rsh Development Todo List
 
 ## UX & Polish
-[ ] Implement TTY-aware output for ANSI color support (ls/grep compatibility)
+[x] Implement TTY-aware output for ANSI color support (ls/grep compatibility)
 [ ] Add Tab-completion for binaries and file paths using rustyline
 [ ] Add dynamic PS1 prompt (Git branch awareness)
 
@@ -10,5 +10,5 @@
 [ ] Implement here-docs (<< EOF) for multi-line string input
 
 ## add builtins
-[ ] source builtin to reload a file
+[x] source builtin to reload a file
 [ ] Native `readjson` builtin (Parse JSON directly into shell variables)

@@ -21,6 +21,7 @@ pub struct Job {
 
 struct ShellState {
     aliases: HashMap<String, String>,
+    functions: HashMap<String, ASTNode>,
     jobs: Vec<Job>,
     job_id_counter: usize,
     last_exit_status: i32,
@@ -30,6 +31,7 @@ impl ShellState {
     fn new() -> Self {
         ShellState {
             aliases: HashMap::new(),
+            functions: HashMap::new(),
             jobs: Vec::new(),
             job_id_counter: 1,
             last_exit_status: 0,
@@ -246,6 +248,10 @@ enum ASTNode {
     Pipeline(Vec<String>, bool),
     LogicalAnd(Box<ASTNode>, Box<ASTNode>),
     LogicalOr(Box<ASTNode>, Box<ASTNode>),
+    FunctionDef {
+        name: String,
+        body: Box<ASTNode>,
+    },
     If {
         condition: Box<ASTNode>,
         then_branch: Box<ASTNode>,
@@ -286,8 +292,8 @@ fn is_incomplete(input: &str, tokens: &[String]) -> bool {
     let mut depth = 0;
     for t in tokens {
         match t.as_str() {
-            "if" | "for" | "while" => depth += 1,
-            "fi" | "done" => depth -= 1,
+            "if" | "for" | "while" | "{" => depth += 1,
+            "fi" | "done" | "}" => depth -= 1,
             _ => {}
         }
     }
@@ -339,8 +345,8 @@ fn split_statements(tokens: &[String]) -> Vec<Vec<String>> {
 
     for t in tokens {
         match t.as_str() {
-            "if" | "for" | "while" => depth += 1,
-            "fi" | "done" => depth -= 1,
+            "if" | "for" | "while" | "{" => depth += 1,
+            "fi" | "done" | "}" => depth -= 1,
             "(" => depth += 1,
             ")" => depth -= 1,
             _ => {}
@@ -615,6 +621,10 @@ fn evaluate_ast(state: &mut ShellState, node: &ASTNode) -> bool {
             }
             last_status
         }
+        ASTNode::FunctionDef { name, body } => {
+            state.functions.insert(name.clone(), *body.clone());
+            true
+        }
         ASTNode::While { condition, body } => {
             let mut last_status = true;
             while evaluate_ast(state, condition) {
@@ -623,8 +633,38 @@ fn evaluate_ast(state: &mut ShellState, node: &ASTNode) -> bool {
             last_status
         }
         ASTNode::Pipeline(tokens, background) => {
-            // THE MAGIC FIX: Parse and expand variables RIGHT NOW, during execution!
+            if tokens.is_empty() {
+                return true;
+            }
+
+            // --- THE INTERCEPTOR: IS THIS A FUNCTION CALL? ---
+            if let Some(func_body) = state.functions.get(&tokens[0]).cloned() {
+                // Save old positional arguments so we don't overwrite the main script's args
+                let mut old_args = Vec::new();
+                for i in 1..tokens.len() {
+                    old_args.push(std::env::var(i.to_string()).ok());
+                    // Inject $1, $2, etc. into the environment!
+                    std::env::set_var(i.to_string(), expand_word(state, &tokens[i]));
+                }
+
+                // Execute the function body
+                let status = evaluate_ast(state, &func_body);
+
+                // Restore the old arguments
+                for (i, old_val) in old_args.into_iter().enumerate() {
+                    let key = (i + 1).to_string();
+                    if let Some(val) = old_val {
+                        std::env::set_var(key, val);
+                    } else {
+                        std::env::remove_var(key);
+                    }
+                }
+                return status;
+            }
+
+            // Normal binary execution
             let commands = parse_pipeline_from_tokens(state, tokens);
+            // ... [Keep the rest of your Pipeline logic exactly the same] ...
 
             if commands.len() == 1 {
                 execute_single(state, &commands[0], *background)
@@ -690,6 +730,41 @@ fn parse_ast(state: &ShellState, tokens: &[String]) -> Option<ASTNode> {
     } else if statements.len() == 1 && statements[0].len() < tokens.len() {
         // Strip out useless trailing/leading semicolons
         return parse_ast(state, &statements[0]);
+    }
+    // 2. PARSE FUNCTION DEFINITIONS
+    let mut is_func = false;
+    let mut func_name = String::new();
+    let mut body_start = 0;
+
+    // Style 1: `func_name() { ... }`
+    if tokens.len() >= 3
+        && tokens[0].ends_with("()")
+        && tokens[1] == "{"
+        && tokens.last().map(|s| s.as_str()) == Some("}")
+    {
+        is_func = true;
+        func_name = tokens[0].trim_end_matches("()").to_string();
+        body_start = 2;
+    }
+    // Style 2: `func_name () { ... }`
+    else if tokens.len() >= 4
+        && tokens[1] == "()"
+        && tokens[2] == "{"
+        && tokens.last().map(|s| s.as_str()) == Some("}")
+    {
+        is_func = true;
+        func_name = tokens[0].clone();
+        body_start = 3;
+    }
+
+    if is_func {
+        let body_tokens = &tokens[body_start..tokens.len() - 1];
+        if let Some(body) = parse_ast(state, body_tokens) {
+            return Some(ASTNode::FunctionDef {
+                name: func_name,
+                body: Box::new(body),
+            });
+        }
     }
     // --- PARSE FOR LOOPS ---
     if tokens[0] == "for" {
@@ -820,14 +895,18 @@ fn main() {
 
     let rc_file = PathBuf::from(&home_dir).join(".rshrc");
     if let Ok(contents) = std::fs::read_to_string(&rc_file) {
+        let mut cleaned_contents = String::new();
+        // Strip comments but keep the newlines intact!
         for line in contents.lines() {
             let trimmed = line.trim();
-            // Ignore empty lines and comments!
-            if !trimmed.is_empty() && !trimmed.starts_with('#') {
-                let tokens = tokenize(trimmed);
-                evaluate_tokens(&mut state, &tokens);
+            if !trimmed.starts_with('#') {
+                cleaned_contents.push_str(trimmed);
+                cleaned_contents.push('\n');
             }
         }
+        // Evaluate the entire file as a single Block!
+        let tokens = tokenize(&cleaned_contents);
+        evaluate_tokens(&mut state, &tokens);
     }
     ctrlc::set_handler(move || {
         println!();

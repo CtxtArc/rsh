@@ -395,7 +395,7 @@ fn expand_glob(word: &str) -> Vec<String> {
     }
 }
 
-pub fn expand_word(state: &ShellState, input: &str) -> String {
+fn expand_word(state: &ShellState, input: &str) -> String {
     let mut result = String::new();
     let mut in_single = false;
     let mut in_double = false;
@@ -834,7 +834,7 @@ fn parse_ast(state: &ShellState, tokens: &[String]) -> Option<ASTNode> {
 
     // --- PARSE BLOCKS (; separated) ---
     // If we find a semicolon that isn't inside a nested structure, split the AST into a Block.
-    if let Some(semi_pos) = tokens.iter().position(|t| t == ";") {
+    if tokens.contains(&";".to_string()) {
         let mut nodes = Vec::new();
         for chunk in tokens.split(|t| t == ";") {
             if !chunk.is_empty() {
@@ -933,12 +933,37 @@ fn main() {
     }
 
     // Handle Subshell / Script execution (-c flag)
-    // ...    // Handle Subshell / Script execution (-c flag)
     let args: Vec<String> = std::env::args().collect();
     if args.len() >= 3 && args[1] == "-c" {
         let tokens = tokenize(&args[2]);
         evaluate_tokens(&mut state, &tokens);
-        return;
+        return; // Exit after running the -c command
+    }
+
+    // --- NEW: HANDLE SCRIPT FILE EXECUTION ---
+    if args.len() == 2 {
+        let script_file = &args[1];
+        match std::fs::read_to_string(script_file) {
+            Ok(contents) => {
+                let mut cleaned = String::new();
+                // Strip comments (including the #! shebang) but preserve newlines for the AST!
+                for line in contents.lines() {
+                    let trimmed = line.trim();
+                    if !trimmed.starts_with('#') {
+                        cleaned.push_str(trimmed);
+                        cleaned.push('\n');
+                    }
+                }
+                let tokens = tokenize(&cleaned);
+                evaluate_tokens(&mut state, &tokens);
+                // Exit with the exact status code of the last command in the script
+                std::process::exit(state.last_exit_status);
+            }
+            Err(_) => {
+                eprintln!("rsh: {}: No such file or directory", script_file);
+                std::process::exit(127);
+            }
+        }
     }
 
     // Determine where to save the history file (~/.rsh_history)
@@ -1426,6 +1451,15 @@ fn execute_pipeline(state: &mut ShellState, pipeline: &[Command], background: bo
 }
 
 fn find_in_path(command: &str) -> Option<PathBuf> {
+    if command.starts_with("./") || command.starts_with("../") || command.starts_with('/') {
+        let path = PathBuf::from(command);
+        if path.is_file() {
+            return Some(path);
+        }
+        return None;
+    }
+
+    // Existing PATH search logic...
     let path_var = std::env::var("PATH").unwrap_or_default();
     for path in std::env::split_paths(&path_var) {
         let full_path = path.join(command);

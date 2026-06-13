@@ -7,7 +7,6 @@ use std::collections::BTreeSet;
 
 pub struct ShellCompleter {
     pub hinter: HistoryHinter,
-    pub highlighter: MatchingBracketHighlighter,
 }
 
 impl Completer for ShellCompleter {

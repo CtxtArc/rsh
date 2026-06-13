@@ -1,12 +1,13 @@
 # rsh Development Todo List
 
-[x] proper escaping in tokenize
 
 ## UX & Polish
+[x] proper escaping in tokenize
 [x] Implement TTY-aware output for ANSI color support (ls/grep compatibility)
 [x] Add Tab-completion for binaries and file paths using rustyline
 [x] Add Tab-completion for commands from history 
-[ ] Add dynamic PS1 prompt (Git branch awareness)
+[x] Add dynamic PS1 and PS2 prompt 
+[ ] add Git branch awareness for PS1
 
 ## Advanced I/O
 [ ] Support stream merging (2>&1 redirection)

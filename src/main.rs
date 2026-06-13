@@ -3,6 +3,7 @@ mod completer;
 mod executor;
 mod expand;
 mod parser;
+mod prompt;
 mod state;
 mod tokenizer;
 mod types;
@@ -15,6 +16,7 @@ use rustyline::Editor;
 
 use completer::ShellCompleter;
 use executor::evaluate_tokens;
+use prompt::format_prompt;
 use state::ShellState;
 use tokenizer::{is_incomplete, tokenize};
 
@@ -78,16 +80,21 @@ fn main() {
         Editor::with_config(config).expect("Failed to create readline editor");
     rl.set_helper(Some(ShellCompleter {
         hinter: rustyline::hint::HistoryHinter::new(),
-        highlighter: rustyline::highlight::MatchingBracketHighlighter::new(),
     }));
     let _ = rl.load_history(&history_file);
 
     let mut input_buffer = String::new();
 
     loop {
-        let prompt = if input_buffer.is_empty() { "$ " } else { "> " };
+        let ps1 = std::env::var("PS1").unwrap_or_else(|_| "\\u@\\h:\\w\\$ ".to_string());
 
-        match rl.readline(prompt) {
+        let prompt_str = if input_buffer.is_empty() {
+            format_prompt(&ps1)
+        } else {
+            std::env::var("PS2").unwrap_or_else(|_| "> ".to_string())
+        };
+
+        match rl.readline(&prompt_str) {
             Ok(line) => {
                 if line.trim().is_empty() && input_buffer.is_empty() {
                     continue;

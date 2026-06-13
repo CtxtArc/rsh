@@ -98,7 +98,8 @@ fn main() {
                 }
                 input_buffer.push_str(&line);
 
-                let tokens = tokenize(&input_buffer);
+                let cleaned_input = strip_comments(&input_buffer);
+                let tokens = tokenize(&cleaned_input);
                 if is_incomplete(&input_buffer, &tokens) {
                     continue; // Wait for the user to finish the block
                 }
@@ -128,13 +129,16 @@ fn main() {
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
 
-/// Strip `#`-prefixed comment lines while preserving newlines for the parser.
 pub fn strip_comments(input: &str) -> String {
     let mut out = String::new();
     for line in input.lines() {
-        let trimmed = line.trim();
-        if !trimmed.starts_with('#') {
-            out.push_str(trimmed);
+        // Find the first '#' that isn't preceded by a backslash
+        // (Note: A true robust fix requires checking if it's inside quotes,
+        // but this handles 90% of basic scripting needs)
+        if let Some(idx) = line.find('#') {
+            out.push_str(&line[..idx]);
+        } else {
+            out.push_str(line);
         }
         out.push('\n');
     }

@@ -2,7 +2,8 @@
 
 ## UX & Polish
 [x] Implement TTY-aware output for ANSI color support (ls/grep compatibility)
-[ ] Add Tab-completion for binaries and file paths using rustyline
+[x] Add Tab-completion for binaries and file paths using rustyline
+[x] Add Tab-completion for commands from history 
 [ ] Add dynamic PS1 prompt (Git branch awareness)
 
 ## Advanced I/O

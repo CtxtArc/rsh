@@ -167,7 +167,13 @@ impl Hinter for ShellCompleter {
     type Hint = String;
 
     fn hint(&self, line: &str, pos: usize, ctx: &Context<'_>) -> Option<String> {
-        self.hinter.hint(line, pos, ctx)
+        let enabled = std::env::var("RSH_HISTORY_HINTS").unwrap_or_else(|_| "1".to_string()) == "1";
+
+        if enabled {
+            self.hinter.hint(line, pos, ctx)
+        } else {
+            None
+        }
     }
 }
 

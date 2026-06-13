@@ -76,7 +76,10 @@ fn main() {
         .build();
     let mut rl: Editor<ShellCompleter, DefaultHistory> =
         Editor::with_config(config).expect("Failed to create readline editor");
-    rl.set_helper(Some(ShellCompleter));
+    rl.set_helper(Some(ShellCompleter {
+        hinter: rustyline::hint::HistoryHinter::new(),
+        highlighter: rustyline::highlight::MatchingBracketHighlighter::new(),
+    }));
     let _ = rl.load_history(&history_file);
 
     let mut input_buffer = String::new();

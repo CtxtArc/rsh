@@ -1,11 +1,14 @@
 use rustyline::completion::{Completer, Pair};
-use rustyline::highlight::Highlighter;
-use rustyline::hint::Hinter;
+use rustyline::highlight::{Highlighter, MatchingBracketHighlighter};
+use rustyline::hint::{Hinter, HistoryHinter};
 use rustyline::validate::Validator;
 use rustyline::{Context, Helper};
 use std::collections::BTreeSet;
 
-pub struct ShellCompleter;
+pub struct ShellCompleter {
+    pub hinter: HistoryHinter,
+    pub highlighter: MatchingBracketHighlighter,
+}
 
 impl Completer for ShellCompleter {
     type Candidate = Pair;
@@ -159,8 +162,20 @@ fn complete_path(prefix: &str) -> Vec<Pair> {
 // ── rustyline Helper trait (required boilerplate) ─────────────────────────────
 
 impl Helper for ShellCompleter {}
+
 impl Hinter for ShellCompleter {
     type Hint = String;
+
+    fn hint(&self, line: &str, pos: usize, ctx: &Context<'_>) -> Option<String> {
+        self.hinter.hint(line, pos, ctx)
+    }
 }
-impl Highlighter for ShellCompleter {}
+
+impl Highlighter for ShellCompleter {
+    // Dim the history hint so it looks like fish's grey suggestion
+    fn highlight_hint<'h>(&self, hint: &'h str) -> std::borrow::Cow<'h, str> {
+        std::borrow::Cow::Owned(format!("\x1b[2m{}\x1b[0m", hint))
+    }
+}
+
 impl Validator for ShellCompleter {}

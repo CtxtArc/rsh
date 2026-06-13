@@ -111,7 +111,7 @@ impl Builtin {
         }
     }
 }
-
+#[derive(Debug, PartialEq, Clone)]
 struct Command {
     command: String,
     args: Vec<String>,
@@ -238,6 +238,25 @@ impl Command {
             append_stderr,
         }
     }
+}
+
+#[derive(Debug, PartialEq, Clone)]
+enum ASTNode {
+    // We now store RAW strings here, delaying Command parsing until execution!
+    Pipeline(Vec<String>, bool),
+    LogicalAnd(Box<ASTNode>, Box<ASTNode>),
+    LogicalOr(Box<ASTNode>, Box<ASTNode>),
+    If {
+        condition: Box<ASTNode>,
+        then_branch: Box<ASTNode>,
+        else_branch: Option<Box<ASTNode>>,
+    },
+    For {
+        var_name: String,
+        items: Vec<String>,
+        body: Box<ASTNode>,
+    },
+    Block(Vec<ASTNode>),
 }
 
 fn match_pattern(pattern: &str, text: &str) -> bool {
@@ -495,73 +514,186 @@ fn parse_pipeline_from_tokens(state: &ShellState, tokens: &[String]) -> Vec<Comm
     commands
 }
 
-fn evaluate_tokens(state: &mut ShellState, tokens: &[String]) -> bool {
-    if tokens.is_empty() {
-        return true;
-    }
-
-    if tokens[0] == "for" {
-        let in_pos = tokens.iter().position(|t| t == "in");
-        let do_pos = tokens.iter().position(|t| t == "do");
-        let done_pos = tokens.iter().rposition(|t| t == "done");
-
-        if let (Some(in_idx), Some(do_idx), Some(done_idx)) = (in_pos, do_pos, done_pos) {
-            let var_name = &tokens[1];
-            let items = &tokens[in_idx + 1..do_idx];
-            let inner_commands = &tokens[do_idx + 1..done_idx];
-
+fn evaluate_ast(state: &mut ShellState, node: &ASTNode) -> bool {
+    match node {
+        ASTNode::For {
+            var_name,
+            items,
+            body,
+        } => {
             let mut last_status = true;
-
             for item in items {
+                // Set the variable in the environment
                 std::env::set_var(var_name, expand_word(state, item));
-                last_status = evaluate_tokens(state, inner_commands);
+                // Recursively execute the body of the loop
+                last_status = evaluate_ast(state, body);
             }
+            last_status
+        }
+        ASTNode::Pipeline(tokens, background) => {
+            // THE MAGIC FIX: Parse and expand variables RIGHT NOW, during execution!
+            let commands = parse_pipeline_from_tokens(state, tokens);
 
-            return last_status;
+            if commands.len() == 1 {
+                execute_single(state, &commands[0], *background)
+            } else {
+                execute_pipeline(state, &commands, *background)
+            }
+        }
+        ASTNode::LogicalAnd(left, right) => {
+            if evaluate_ast(state, left) {
+                evaluate_ast(state, right)
+            } else {
+                false
+            }
+        }
+        ASTNode::LogicalOr(left, right) => {
+            if !evaluate_ast(state, left) {
+                evaluate_ast(state, right)
+            } else {
+                true
+            }
+        }
+        ASTNode::Block(nodes) => {
+            let mut last_status = true;
+            for n in nodes {
+                last_status = evaluate_ast(state, n);
+            }
+            last_status
+        }
+        ASTNode::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            // Run the condition. If it succeeds (returns true / exit code 0), run the THEN branch.
+            if evaluate_ast(state, condition) {
+                evaluate_ast(state, then_branch)
+            } else if let Some(else_node) = else_branch {
+                // Otherwise, if there is an ELSE branch, run that.
+                evaluate_ast(state, else_node)
+            } else {
+                // If condition failed and there's no else, the `if` block succeeds by default (exit code 0)
+                state.last_exit_status = 0;
+                true
+            }
+        }
+    }
+}
+
+fn parse_ast(state: &ShellState, tokens: &[String]) -> Option<ASTNode> {
+    if tokens.is_empty() {
+        return None;
+    }
+    // --- PARSE FOR LOOPS ---
+    if tokens[0] == "for" {
+        let in_pos = tokens.iter().position(|t| t == "in")?;
+        let do_pos = tokens.iter().position(|t| t == "do")?;
+        let done_pos = tokens.iter().rposition(|t| t == "done")?;
+
+        if in_pos < do_pos && do_pos < done_pos {
+            let var_name = tokens[1].clone();
+            let items = tokens[in_pos + 1..do_pos].to_vec();
+
+            // Recursively parse the inside of the loop!
+            let body_tokens = &tokens[do_pos + 1..done_pos];
+            let body = Box::new(parse_ast(state, body_tokens)?);
+
+            return Some(ASTNode::For {
+                var_name,
+                items,
+                body,
+            });
         } else {
-            eprintln!("rsh: syntax error in for loop");
-            return false;
+            return None; // Syntax error in the loop structure
         }
     }
 
-    let logical_groups = parse_logic(state, tokens);
-    let mut skip = false;
-    let mut last_success = true;
+    // --- PARSE IF STATEMENTS ---
+    if tokens[0] == "if" {
+        let then_pos = tokens.iter().position(|t| t == "then")?;
+        let fi_pos = tokens.iter().rposition(|t| t == "fi")?;
 
-    for group in logical_groups {
-        if group.pipeline.is_empty()
-            || (group.pipeline.len() == 1 && group.pipeline[0].command.is_empty())
-        {
-            continue;
-        }
+        let else_pos = tokens.iter().position(|t| t == "else");
 
-        if skip {
-            match group.next_op {
-                Operator::And => skip = true,
-                Operator::Or => skip = false,
-                Operator::Async => skip = false,
-                Operator::None => {}
+        let condition_tokens = &tokens[1..then_pos];
+        let condition = Box::new(parse_ast(state, condition_tokens)?);
+
+        let then_branch;
+        let mut else_branch = None;
+
+        if let Some(ep) = else_pos {
+            // We have an else!
+            if ep > then_pos && ep < fi_pos {
+                then_branch = Box::new(parse_ast(state, &tokens[then_pos + 1..ep])?);
+                else_branch = Some(Box::new(parse_ast(state, &tokens[ep + 1..fi_pos])?));
+            } else {
+                return None; // Syntax error: else is out of bounds
             }
-            continue;
-        }
-
-        let is_background = group.next_op == Operator::Async;
-
-        last_success = if group.pipeline.len() == 1 {
-            execute_single(state, &group.pipeline[0], is_background)
         } else {
-            execute_pipeline(state, &group.pipeline, is_background)
-        };
-
-        match group.next_op {
-            Operator::And => skip = !last_success,
-            Operator::Or => skip = last_success,
-            Operator::Async => skip = false,
-            Operator::None => {}
+            // No else branch
+            then_branch = Box::new(parse_ast(state, &tokens[then_pos + 1..fi_pos])?);
         }
+
+        return Some(ASTNode::If {
+            condition,
+            then_branch,
+            else_branch,
+        });
     }
 
-    last_success
+    // --- PARSE BLOCKS (; separated) ---
+    // If we find a semicolon that isn't inside a nested structure, split the AST into a Block.
+    if let Some(semi_pos) = tokens.iter().position(|t| t == ";") {
+        let mut nodes = Vec::new();
+        for chunk in tokens.split(|t| t == ";") {
+            if !chunk.is_empty() {
+                if let Some(node) = parse_ast(state, chunk) {
+                    nodes.push(node);
+                }
+            }
+        }
+        return Some(ASTNode::Block(nodes));
+    }
+
+    // --- PARSE LOGICAL && and || ---
+    if let Some(and_pos) = tokens.iter().position(|t| t == "&&") {
+        let left = parse_ast(state, &tokens[..and_pos])?;
+        let right = parse_ast(state, &tokens[and_pos + 1..])?;
+        return Some(ASTNode::LogicalAnd(Box::new(left), Box::new(right)));
+    }
+    if let Some(or_pos) = tokens.iter().position(|t| t == "||") {
+        let left = parse_ast(state, &tokens[..or_pos])?;
+        let right = parse_ast(state, &tokens[or_pos + 1..])?;
+        return Some(ASTNode::LogicalOr(Box::new(left), Box::new(right)));
+    }
+
+    // --- PARSE PIPELINES AND COMMANDS ---
+    let is_background = tokens.last().map(|s| s.as_str()) == Some("&");
+    let cmd_tokens = if is_background {
+        &tokens[..tokens.len() - 1]
+    } else {
+        tokens
+    };
+
+    if cmd_tokens.is_empty() {
+        None
+    } else {
+        // Just store the raw tokens. DO NOT parse them into Commands yet!
+        Some(ASTNode::Pipeline(cmd_tokens.to_vec(), is_background))
+    }
+}
+
+fn evaluate_tokens(state: &mut ShellState, tokens: &[String]) -> bool {
+    // 1. Convert the flat list of string tokens into a recursive Syntax Tree
+    if let Some(ast) = parse_ast(state, tokens) {
+        // 2. Execute the tree!
+        evaluate_ast(state, &ast)
+    } else {
+        eprintln!("rsh: syntax error");
+        state.last_exit_status = 258; // Standard bash syntax error code
+        false
+    }
 }
 
 fn main() {

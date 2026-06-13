@@ -7,7 +7,7 @@
 [x] Add Tab-completion for binaries and file paths using rustyline
 [x] Add Tab-completion for commands from history 
 [x] Add dynamic PS1 and PS2 prompt 
-[ ] add Git branch awareness for PS1
+[x] add Git branch awareness for PS1
 
 ## Advanced I/O
 [ ] Support stream merging (2>&1 redirection)

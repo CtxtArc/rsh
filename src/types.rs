@@ -8,7 +8,7 @@ pub enum Builtin {
     Echo(Vec<String>),
     Type(Vec<String>),
     Pwd,
-    Cd(String),
+    Cd(Option<String>),
     Export(String, String),
     Alias(Vec<String>),
     Jobs,
@@ -30,7 +30,7 @@ impl Builtin {
             }
             "echo" => Some(Builtin::Echo(args.to_vec())),
             "type" => Some(Builtin::Type(args.to_vec())),
-            "cd" => Some(Builtin::Cd(args.first().cloned().unwrap_or_default())),
+            "cd" => Some(Builtin::Cd(args.get(0).cloned())),
             "pwd" => Some(Builtin::Pwd),
             "export" => {
                 if let Some(arg) = args.first() {

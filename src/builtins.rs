@@ -31,13 +31,21 @@ pub fn run_builtin<W: Write, E: Write>(
             true
         }
 
-        Builtin::Cd(path) => match std::env::set_current_dir(&path) {
-            Ok(_) => true,
-            Err(_) => {
-                writeln!(err_output, "cd: {}: No such file or directory", path).unwrap();
+        Builtin::Cd(target_opt) => {
+            // 1. Determine the target directory
+            let target = match target_opt {
+                Some(dir) => dir,
+                None => std::env::var("HOME").unwrap_or_else(|_| "/".to_string()),
+            };
+
+            // 2. Attempt the system call
+            if let Err(e) = std::env::set_current_dir(&target) {
+                eprintln!("rsh: cd: {}: {}", target, e);
                 false
+            } else {
+                true
             }
-        },
+        }
 
         Builtin::Export(key, value) => {
             std::env::set_var(key, value);

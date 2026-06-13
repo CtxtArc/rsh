@@ -251,6 +251,10 @@ enum ASTNode {
         then_branch: Box<ASTNode>,
         else_branch: Option<Box<ASTNode>>,
     },
+    While {
+        condition: Box<ASTNode>,
+        body: Box<ASTNode>,
+    },
     For {
         var_name: String,
         items: Vec<String>,
@@ -275,6 +279,87 @@ fn match_pattern(pattern: &str, text: &str) -> bool {
             false
         }
     }
+}
+
+fn is_incomplete(input: &str, tokens: &[String]) -> bool {
+    // 1. Check for unclosed keywords (for, if, while)
+    let mut depth = 0;
+    for t in tokens {
+        match t.as_str() {
+            "if" | "for" | "while" => depth += 1,
+            "fi" | "done" => depth -= 1,
+            _ => {}
+        }
+    }
+    if depth > 0 {
+        return true;
+    }
+
+    // 2. Check for unclosed quotes, subshells, or trailing slashes!
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+    let mut paren_depth = 0;
+
+    let chars: Vec<char> = input.chars().collect();
+    let mut i = 0;
+
+    while i < chars.len() {
+        let c = chars[i];
+        if escaped {
+            escaped = false;
+            i += 1;
+            continue;
+        }
+        match c {
+            '\\' => escaped = true,
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            '$' if !in_single => {
+                if i + 1 < chars.len() && chars[i + 1] == '(' {
+                    paren_depth += 1;
+                    i += 1;
+                }
+            }
+            '(' if paren_depth > 0 && !in_single => paren_depth += 1,
+            ')' if paren_depth > 0 && !in_single => paren_depth -= 1,
+            _ => {}
+        }
+        i += 1;
+    }
+
+    // If any of these are left open, the line is incomplete!
+    in_single || in_double || paren_depth > 0 || escaped
+}
+
+fn split_statements(tokens: &[String]) -> Vec<Vec<String>> {
+    let mut statements = Vec::new();
+    let mut current = Vec::new();
+    let mut depth = 0;
+
+    for t in tokens {
+        match t.as_str() {
+            "if" | "for" | "while" => depth += 1,
+            "fi" | "done" => depth -= 1,
+            "(" => depth += 1,
+            ")" => depth -= 1,
+            _ => {}
+        }
+
+        // Only split by semicolon if we are at the top level!
+        if t == ";" && depth == 0 {
+            if !current.is_empty() {
+                statements.push(current.clone());
+                current.clear();
+            }
+        } else {
+            current.push(t.clone());
+        }
+    }
+    if !current.is_empty() {
+        statements.push(current);
+    }
+    statements
 }
 
 fn expand_glob(word: &str) -> Vec<String> {
@@ -530,6 +615,13 @@ fn evaluate_ast(state: &mut ShellState, node: &ASTNode) -> bool {
             }
             last_status
         }
+        ASTNode::While { condition, body } => {
+            let mut last_status = true;
+            while evaluate_ast(state, condition) {
+                last_status = evaluate_ast(state, body);
+            }
+            last_status
+        }
         ASTNode::Pipeline(tokens, background) => {
             // THE MAGIC FIX: Parse and expand variables RIGHT NOW, during execution!
             let commands = parse_pipeline_from_tokens(state, tokens);
@@ -585,6 +677,20 @@ fn parse_ast(state: &ShellState, tokens: &[String]) -> Option<ASTNode> {
     if tokens.is_empty() {
         return None;
     }
+    // 1. SAFELY PARSE BLOCKS FIRST
+    let statements = split_statements(tokens);
+    if statements.len() > 1 {
+        let mut nodes = Vec::new();
+        for chunk in statements {
+            if let Some(node) = parse_ast(state, &chunk) {
+                nodes.push(node);
+            }
+        }
+        return Some(ASTNode::Block(nodes));
+    } else if statements.len() == 1 && statements[0].len() < tokens.len() {
+        // Strip out useless trailing/leading semicolons
+        return parse_ast(state, &statements[0]);
+    }
     // --- PARSE FOR LOOPS ---
     if tokens[0] == "for" {
         let in_pos = tokens.iter().position(|t| t == "in")?;
@@ -593,22 +699,31 @@ fn parse_ast(state: &ShellState, tokens: &[String]) -> Option<ASTNode> {
 
         if in_pos < do_pos && do_pos < done_pos {
             let var_name = tokens[1].clone();
-            let items = tokens[in_pos + 1..do_pos].to_vec();
-
-            // Recursively parse the inside of the loop!
-            let body_tokens = &tokens[do_pos + 1..done_pos];
-            let body = Box::new(parse_ast(state, body_tokens)?);
-
+            // Safely filter out stray semicolons just in case!
+            let items = tokens[in_pos + 1..do_pos]
+                .iter()
+                .filter(|&t| t != ";")
+                .cloned()
+                .collect();
+            let body = Box::new(parse_ast(state, &tokens[do_pos + 1..done_pos])?);
             return Some(ASTNode::For {
                 var_name,
                 items,
                 body,
             });
-        } else {
-            return None; // Syntax error in the loop structure
         }
     }
 
+    // 4. PARSE WHILE LOOPS
+    if tokens[0] == "while" {
+        let do_pos = tokens.iter().position(|t| t == "do")?;
+        let done_pos = tokens.iter().rposition(|t| t == "done")?;
+
+        let condition = Box::new(parse_ast(state, &tokens[1..do_pos])?);
+        let body = Box::new(parse_ast(state, &tokens[do_pos + 1..done_pos])?);
+
+        return Some(ASTNode::While { condition, body });
+    }
     // --- PARSE IF STATEMENTS ---
     if tokens[0] == "if" {
         let then_pos = tokens.iter().position(|t| t == "then")?;
@@ -754,26 +869,39 @@ fn main() {
     // Silently load existing history if it exists
     let _ = rl.load_history(&history_file);
 
+    let mut input_buffer = String::new();
     loop {
-        // rustyline handles printing the prompt and reading the line
-        let readline = rl.readline("$ ");
+        // Change prompt to "> " if waiting for a multi-line block to finish
+        let prompt = if input_buffer.is_empty() { "$ " } else { "> " };
+        let readline = rl.readline(prompt);
 
         match readline {
             Ok(line) => {
-                let trimmed_input = line.trim();
-
-                if trimmed_input.is_empty() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() && input_buffer.is_empty() {
                     continue;
                 }
 
-                let _ = rl.add_history_entry(trimmed_input);
+                if !input_buffer.is_empty() {
+                    input_buffer.push('\n');
+                }
+                input_buffer.push_str(&line);
 
+                let tokens = tokenize(&input_buffer);
+
+                // Wait for the user to close their `if` or `for` loops!
+                if is_incomplete(&input_buffer, &tokens) {
+                    continue;
+                }
+
+                let _ = rl.add_history_entry(input_buffer.trim());
                 let _ = rl.save_history(&history_file);
 
-                let tokens = tokenize(trimmed_input);
                 evaluate_tokens(&mut state, &tokens);
+                input_buffer.clear(); // Reset for the next command
             }
             Err(ReadlineError::Interrupted) => {
+                input_buffer.clear(); // Ctrl-C clears the buffer
                 continue;
             }
             Err(ReadlineError::Eof) => {
@@ -786,7 +914,6 @@ fn main() {
             }
         }
     }
-
     let _ = rl.save_history(&history_file);
 }
 
@@ -1276,19 +1403,24 @@ pub fn tokenize(input: &str) -> Vec<String> {
                     continue;
                 }
             }
-            '(' if subshell_depth > 0 && !in_single && !in_double => {
+            '(' if subshell_depth > 0 && !in_single => {
                 subshell_depth += 1; // Handle nested subshells like $(echo $(ls))
                 current_token.push(c);
             }
-            ')' if subshell_depth > 0 && !in_single && !in_double => {
+            ')' if subshell_depth > 0 && !in_single => {
                 subshell_depth -= 1;
                 current_token.push(c);
             }
-            ' ' | '\t' | '\n' if !in_single && !in_double && subshell_depth == 0 => {
-                // Only split on spaces if we are NOT in quotes and NOT in a subshell
+            ' ' | '\t' | '\n' | ';' if !in_single && !in_double && subshell_depth == 0 => {
                 if !current_token.is_empty() {
                     tokens.push(current_token.clone());
                     current_token.clear();
+                }
+                // Normalize semicolons and newlines into explicit statement separators
+                if c == '\n' || c == ';' {
+                    if tokens.last().map(|s| s.as_str()) != Some(";") {
+                        tokens.push(";".to_string());
+                    }
                 }
             }
             _ => {

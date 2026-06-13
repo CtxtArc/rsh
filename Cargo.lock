@@ -434,6 +434,7 @@ dependencies = [
  "ctrlc",
  "libc",
  "predicates",
+ "regex",
  "rustyline",
  "tempfile",
 ]

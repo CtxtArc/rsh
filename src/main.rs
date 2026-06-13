@@ -63,6 +63,7 @@ enum Builtin {
     Jobs,
     Fg(Option<usize>),
     Bg(Option<usize>),
+    RegexMatch(String, String),
 }
 
 impl Builtin {
@@ -95,6 +96,18 @@ impl Builtin {
                     }
                 }
                 None
+            }
+            "[[" => {
+                // We expect exactly: [[ text =~ pattern ]]
+                // Since `[[` is the command, args will be: ["text", "=~", "pattern", "]]"]
+                if args.len() >= 4
+                    && args[1] == "=~"
+                    && args.last().map(|s| s.as_str()) == Some("]]")
+                {
+                    Some(Builtin::RegexMatch(args[0].clone(), args[2].clone()))
+                } else {
+                    None // Invalid syntax, let the shell handle the error
+                }
             }
             "alias" => {
                 let alias_args = args.iter().map(|s| s.to_string()).collect();
@@ -528,7 +541,11 @@ fn expand_word(state: &ShellState, input: &str) -> String {
                     var_name.push(chars[i]);
                     i += 1;
                 }
-
+                //  If no variable name was found, it's a literal '$'! ---
+                if var_name.is_empty() {
+                    result.push('$');
+                    continue;
+                }
                 if let Ok(val) = std::env::var(&var_name) {
                     result.push_str(&val);
                 }
@@ -1139,6 +1156,13 @@ fn execute_single(state: &mut ShellState, expr: &Command, background: bool) -> b
                 }
                 true
             }
+            Builtin::RegexMatch(text, pattern) => match regex::Regex::new(&pattern) {
+                Ok(re) => re.is_match(&text),
+                Err(e) => {
+                    eprintln!("rsh: regex syntax error: {}", e);
+                    false
+                }
+            },
             Builtin::Bg(target_id) => {
                 let id = target_id.unwrap_or(1);
                 if let Some(job) = state.jobs.iter_mut().find(|j| j.id == id) {
@@ -1377,6 +1401,14 @@ fn execute_pipeline(state: &mut ShellState, pipeline: &[Command], background: bo
                             .unwrap();
                     }
                 }
+                Builtin::RegexMatch(text, pattern) => match regex::Regex::new(&pattern) {
+                    Ok(re) => {
+                        let _ = re.is_match(&text);
+                    }
+                    Err(e) => {
+                        eprintln!("rsh: regex syntax error: {}", e);
+                    }
+                },
                 Builtin::Fg(_) | Builtin::Bg(_) => {
                     writeln!(output, "rsh: fg/bg not supported inside pipelines").unwrap();
                 }

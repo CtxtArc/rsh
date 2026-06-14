@@ -16,8 +16,10 @@
 ## add builtins
 [x] source builtin to reload a file
 [ ] Native `readjson` builtin (Parse JSON directly into shell variables)
-[ ] Native operators (eg. -f -ne -z ..)
 
+## expand scripting
+[ ] Native operators (eg. -f -ne -z ..)
+[ ] lists
 
 ## anonymous operator
 [ ] anonymous operator (eg. cd ~/coding/\_/rsh/ will resolve to ~/coding/rust/rsh/ because it will find the missing folder)

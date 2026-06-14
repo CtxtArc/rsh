@@ -17,3 +17,9 @@
 [x] source builtin to reload a file
 [ ] Native `readjson` builtin (Parse JSON directly into shell variables)
 [ ] Native operators (eg. -f -ne -z ..)
+
+
+## anonymous operator
+[ ] anonymous operator (eg. cd ~/coding/\_/rsh/ will resolve to ~/coding/rust/rsh/ because it will find the missing folder)
+[ ] make cd resolve recursively using `_` (eg. cd ~/\_/rsh/ will resolve all dirs bewteen ~/ and rsh/ and find the path: ~/coding/rust/rsh/)
+[ ] use `_` as a find command (eg. cd ./\_/rsh/ will find the path of dir rsh and go in it from curr dir, ls ./\_/main.rs will find the first occurence of main.rs r maybe list all main.rs not sure yet) 

@@ -2,6 +2,7 @@ mod builtins;
 mod completer;
 mod executor;
 mod expand;
+mod fuzzy;
 mod parser;
 mod prompt;
 mod state;

@@ -1,3 +1,4 @@
+use crate::fuzzy::resolve_anonymous_path;
 use crate::state::ShellState;
 use std::path::PathBuf;
 
@@ -94,6 +95,7 @@ pub fn expand_word(state: &ShellState, input: &str) -> String {
                     }
                     i += 2;
                     match eval_math(&math_expr) {
+                        // Make sure this path is correct for your math eval!
                         Ok(num) => result.push_str(&num.to_string()),
                         Err(e) => eprintln!("rsh: math error: {}", e),
                     }
@@ -154,7 +156,9 @@ pub fn expand_word(state: &ShellState, input: &str) -> String {
                             _ => result.push_str(default),
                         }
                     } else {
-                        if let Ok(val) = std::env::var(&inside) {
+                        if let Some(val) = state.json_vars.get(&inside) {
+                            result.push_str(val);
+                        } else if let Ok(val) = std::env::var(&inside) {
                             result.push_str(&val);
                         }
                     }
@@ -184,6 +188,31 @@ pub fn expand_word(state: &ShellState, input: &str) -> String {
         }
         i += 1;
     }
+
+    // ──> NEW: The Anonymous Operator Interceptor <──
+    // We do this AFTER the loop so things like $HOME/_/target work perfectly.
+    if let Some(idx) = result.find("/_/") {
+        let base_raw = &result[..idx];
+        let pattern = &result[idx + 3..];
+
+        // Safely expand the base path (handle `~` and root `/`)
+        let expanded_base = if base_raw == "~" {
+            std::env::var("HOME").unwrap_or_else(|_| "/".to_string())
+        } else if base_raw.starts_with("~/") {
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+            format!("{}{}", home, &base_raw[1..])
+        } else if base_raw.is_empty() {
+            "/".to_string() // Handles absolute path fuzzy jumping: /_/etc
+        } else {
+            base_raw.to_string() // Handles relative like ._/, ../_/, or literal paths
+        };
+
+        // Fire your custom fzf engine!
+        if let Some(best_match) = resolve_anonymous_path(&expanded_base, pattern) {
+            return best_match;
+        }
+    }
+    // ───────────────────────────────────────────────
 
     result
 }

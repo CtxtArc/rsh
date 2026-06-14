@@ -17,11 +17,12 @@
 [x] source builtin to reload a file
 [x] Native `readjson` builtin (Parse JSON directly into shell variables)
 [x] make readjson way faster by caching vars
-[ ] time command
+[x] time command
 
 ## expand scripting
-[ ] Native operators (eg. -f -ne -z ..)
-[ ] lists
+[x] Native operators (eg. -f -ne -z ..)
+[x] operators -contains, -starts, -ends ...
+[ ] lists and arrays
 
 ## anonymous operator
 [ ] anonymous operator (eg. cd ~/coding/\_/rsh/ will resolve to ~/coding/rust/rsh/ because it will find the missing folder)

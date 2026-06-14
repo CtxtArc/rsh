@@ -46,6 +46,7 @@ pub fn run_builtin<W: Write, E: Write>(
                 true
             }
         }
+        Builtin::Test(args) => evaluate_test(&args),
 
         Builtin::Export(key, value) => {
             std::env::set_var(key, value);
@@ -226,5 +227,79 @@ pub fn run_builtin<W: Write, E: Write>(
                 false
             }
         },
+    }
+}
+fn evaluate_test(args: &[String]) -> bool {
+    match args.len() {
+        0 => false,
+        1 => !args[0].is_empty(), // Single string is true if not empty
+        2 => {
+            // Unary operators (e.g., -f file.txt)
+            let op = args[0].as_str();
+            let val = args[1].as_str();
+            match op {
+                // String tests
+                "-z" => val.is_empty(),
+                "-n" => !val.is_empty(),
+                // File tests
+                "-e" => std::path::Path::new(val).exists(),
+                "-f" => std::path::Path::new(val).is_file(),
+                "-d" => std::path::Path::new(val).is_dir(),
+                // Type checks
+                "-isint" => val.parse::<i64>().is_ok(),
+                "-isnum" => val.parse::<f64>().is_ok(),
+                _ => {
+                    eprintln!("rsh: test: {}: unary operator expected", op);
+                    false
+                }
+            }
+        }
+        3 => {
+            // Binary operators (e.g., $A -eq $B, or $A == $B)
+            let left = args[0].as_str();
+            let op = args[1].as_str();
+            let right = args[2].as_str();
+
+            match op {
+                // String comparisons
+                "=" | "==" => left == right,
+                "!=" => left != right,
+                // Integer comparisons
+                "-eq" | "-ne" | "-gt" | "-ge" | "-lt" | "-le" => {
+                    let l: i64 = left.parse().unwrap_or(0);
+                    let r: i64 = right.parse().unwrap_or(0);
+                    match op {
+                        "-eq" => l == r,
+                        "-ne" => l != r,
+                        "-gt" => l > r,
+                        "-ge" => l >= r,
+                        "-lt" => l < r,
+                        "-le" => l <= r,
+                        _ => unreachable!(),
+                    }
+                }
+                // String inclusion
+                "-contains" => left.contains(right),
+                "-starts" => left.starts_with(right),
+                "-ends" => left.ends_with(right),
+                // Native Grep (File contains string)
+                "-fcontains" => {
+                    if let Ok(contents) = std::fs::read_to_string(left) {
+                        contents.contains(right)
+                    } else {
+                        false
+                    }
+                }
+
+                _ => {
+                    eprintln!("rsh: test: {}: binary operator expected", op);
+                    false
+                }
+            }
+        }
+        _ => {
+            eprintln!("rsh: test: too many arguments");
+            false
+        }
     }
 }

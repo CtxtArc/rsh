@@ -17,6 +17,7 @@ pub enum Builtin {
     RegexMatch(String, String),
     Source(String),
     ReadJson(String),
+    Test(Vec<String>),
 }
 
 impl Builtin {
@@ -58,6 +59,13 @@ impl Builtin {
             "bg" => Some(Builtin::Bg(args.first().and_then(|s| s.parse().ok()))),
             "source" | "." => Some(Builtin::Source(args.first().cloned().unwrap_or_default())),
             "readjson" => Some(Builtin::ReadJson(args.first().cloned().unwrap_or_default())),
+            "test" | "[" => {
+                let mut test_args = args.to_vec();
+                if command == "[" && test_args.last().map(|s| s.as_str()) == Some("]") {
+                    test_args.pop();
+                }
+                Some(Builtin::Test(test_args))
+            }
             _ => None,
         }
     }

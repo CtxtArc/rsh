@@ -20,6 +20,7 @@ pub struct ShellState {
     pub jobs: Vec<Job>,
     pub job_id_counter: usize,
     pub last_exit_status: i32,
+    pub json_vars: std::collections::HashMap<String, String>,
 }
 
 impl ShellState {
@@ -30,6 +31,7 @@ impl ShellState {
             jobs: Vec::new(),
             job_id_counter: 1,
             last_exit_status: 0,
+            json_vars: HashMap::new(),
         }
     }
 }

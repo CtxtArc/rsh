@@ -170,8 +170,12 @@ pub fn expand_word(state: &ShellState, input: &str) -> String {
                 }
                 if var_name.is_empty() {
                     result.push('$');
-                } else if let Ok(val) = std::env::var(&var_name) {
-                    result.push_str(&val);
+                } else {
+                    if let Some(val) = state.json_vars.get(&var_name) {
+                        result.push_str(val);
+                    } else if let Ok(val) = std::env::var(&var_name) {
+                        result.push_str(&val);
+                    }
                 }
                 continue;
             }

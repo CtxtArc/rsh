@@ -16,6 +16,7 @@ pub enum Builtin {
     Bg(Option<usize>),
     RegexMatch(String, String),
     Source(String),
+    ReadJson(String),
 }
 
 impl Builtin {
@@ -56,6 +57,7 @@ impl Builtin {
             "fg" => Some(Builtin::Fg(args.first().and_then(|s| s.parse().ok()))),
             "bg" => Some(Builtin::Bg(args.first().and_then(|s| s.parse().ok()))),
             "source" | "." => Some(Builtin::Source(args.first().cloned().unwrap_or_default())),
+            "readjson" => Some(Builtin::ReadJson(args.first().cloned().unwrap_or_default())),
             _ => None,
         }
     }

@@ -157,6 +157,39 @@ pub fn run_builtin<W: Write, E: Write>(
             }
             true
         }
+        Builtin::ReadJson(path) => {
+            match std::fs::File::open(&path) {
+                Ok(file) => {
+                    match serde_json::from_reader::<_, serde_json::Value>(file) {
+                        Ok(serde_json::Value::Object(map)) => {
+                            for (key, value) in map {
+                                // We convert JSON values to strings for env vars
+                                let val_str = match value {
+                                    serde_json::Value::String(s) => s,
+                                    serde_json::Value::Number(n) => n.to_string(),
+                                    serde_json::Value::Bool(b) => b.to_string(),
+                                    _ => value.to_string(),
+                                };
+                                state.json_vars.insert(key, val_str);
+                            }
+                            true
+                        }
+                        _ => {
+                            let _ = writeln!(
+                                err_output,
+                                "rsh: readjson: {} is not a valid JSON object",
+                                path
+                            );
+                            false
+                        }
+                    }
+                }
+                Err(e) => {
+                    let _ = writeln!(err_output, "rsh: readjson: {}: {}", path, e);
+                    false
+                }
+            }
+        }
 
         Builtin::Bg(target_id) => {
             let id = target_id.unwrap_or(1);

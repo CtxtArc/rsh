@@ -436,6 +436,7 @@ dependencies = [
  "predicates",
  "regex",
  "rustyline",
+ "serde_json",
  "tempfile",
 ]
 

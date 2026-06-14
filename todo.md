@@ -15,7 +15,8 @@
 
 ## add builtins
 [x] source builtin to reload a file
-[ ] Native `readjson` builtin (Parse JSON directly into shell variables)
+[x] Native `readjson` builtin (Parse JSON directly into shell variables)
+[x] make readjson way faster by caching vars
 
 ## expand scripting
 [ ] Native operators (eg. -f -ne -z ..)

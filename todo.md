@@ -17,6 +17,7 @@
 [x] source builtin to reload a file
 [x] Native `readjson` builtin (Parse JSON directly into shell variables)
 [x] make readjson way faster by caching vars
+[ ] time command
 
 ## expand scripting
 [ ] Native operators (eg. -f -ne -z ..)

@@ -87,8 +87,41 @@ pub fn evaluate_ast(state: &mut ShellState, node: &ASTNode) -> bool {
                 return true;
             }
 
-            // Function call interception
+            // ──> NEW: The `time` Keyword Interceptor <──
+            if tokens[0] == "time" {
+                if tokens.len() == 1 {
+                    return true; // Nothing to time
+                }
+
+                // 1. Record start times
+                let start_time = std::time::Instant::now();
+                let mut usage_start = unsafe { std::mem::zeroed::<libc::rusage>() };
+                unsafe { libc::getrusage(libc::RUSAGE_CHILDREN, &mut usage_start) };
+
+                // 2. Recursively evaluate the rest of the pipeline!
+                let inner_node = ASTNode::Pipeline(tokens[1..].to_vec(), *background);
+                let result = evaluate_ast(state, &inner_node);
+
+                // 3. Record end times
+                let mut usage_end = unsafe { std::mem::zeroed::<libc::rusage>() };
+                unsafe { libc::getrusage(libc::RUSAGE_CHILDREN, &mut usage_end) };
+
+                // 4. Calculate math
+                let real = start_time.elapsed().as_secs_f64();
+
+                let to_sec =
+                    |tv: libc::timeval| tv.tv_sec as f64 + (tv.tv_usec as f64 / 1_000_000.0);
+                let user = to_sec(usage_end.ru_utime) - to_sec(usage_start.ru_utime);
+                let sys = to_sec(usage_end.ru_stime) - to_sec(usage_start.ru_stime);
+
+                eprintln!("\nreal\t{:.3}s\nuser\t{:.3}s\nsys\t{:.3}s", real, user, sys);
+                return result;
+            }
+            // ──────────────────────────────────────────
+
+            // ... (Keep your existing Function call interception and pipeline execution here!)
             if let Some(func_body) = state.functions.get(&tokens[0]).cloned() {
+                // ...
                 // Inject $1, $2, … into environment
                 let mut saved: Vec<Option<String>> = Vec::new();
                 for (i, token) in tokens[1..].iter().enumerate() {

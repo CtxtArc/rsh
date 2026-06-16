@@ -87,26 +87,21 @@ pub fn evaluate_ast(state: &mut ShellState, node: &ASTNode) -> bool {
                 return true;
             }
 
-            // ──> NEW: The `time` Keyword Interceptor <──
             if tokens[0] == "time" {
                 if tokens.len() == 1 {
                     return true; // Nothing to time
                 }
 
-                // 1. Record start times
                 let start_time = std::time::Instant::now();
                 let mut usage_start = unsafe { std::mem::zeroed::<libc::rusage>() };
                 unsafe { libc::getrusage(libc::RUSAGE_CHILDREN, &mut usage_start) };
 
-                // 2. Recursively evaluate the rest of the pipeline!
                 let inner_node = ASTNode::Pipeline(tokens[1..].to_vec(), *background);
                 let result = evaluate_ast(state, &inner_node);
 
-                // 3. Record end times
                 let mut usage_end = unsafe { std::mem::zeroed::<libc::rusage>() };
                 unsafe { libc::getrusage(libc::RUSAGE_CHILDREN, &mut usage_end) };
 
-                // 4. Calculate math
                 let real = start_time.elapsed().as_secs_f64();
 
                 let to_sec =
@@ -119,9 +114,7 @@ pub fn evaluate_ast(state: &mut ShellState, node: &ASTNode) -> bool {
             }
             // ──────────────────────────────────────────
 
-            // ... (Keep your existing Function call interception and pipeline execution here!)
             if let Some(func_body) = state.functions.get(&tokens[0]).cloned() {
-                // ...
                 // Inject $1, $2, … into environment
                 let mut saved: Vec<Option<String>> = Vec::new();
                 for (i, token) in tokens[1..].iter().enumerate() {
@@ -160,6 +153,16 @@ pub fn execute_single(state: &mut ShellState, cmd: &Command, background: bool) -
 
     // Alias expansion
     let (cmd_name, cmd_args) = expand_alias(state, &cmd.command, &cmd.args);
+    // If the command is just `VAR=value` with no arguments:
+    if cmd_args.is_empty() && cmd_name.contains('=') {
+        if let Some((name, value)) = cmd_name.split_once('=') {
+            if !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                std::env::set_var(name, value);
+                state.last_exit_status = 0;
+                return true;
+            }
+        }
+    }
 
     if let Some(builtin) = Builtin::parse(&cmd_name, &cmd_args) {
         let ok = run_builtin(state, builtin, &mut stdout_sink, &mut stderr_sink);
@@ -190,7 +193,6 @@ pub fn execute_single(state: &mut ShellState, cmd: &Command, background: bool) -
             }
         }
     } else if cmd.heredoc_content.is_some() {
-        // NEW: If we have a heredoc, force the child to wait for our pipe!
         child.stdin(std::process::Stdio::piped());
     }
 
@@ -254,7 +256,6 @@ pub fn execute_pipeline(state: &mut ShellState, pipeline: &[Command], background
             let mut buf = Vec::new();
             let mut err = std::io::stderr();
             match builtin {
-                // Builtins that are pipe-safe (produce output)
                 Builtin::Echo(_)
                 | Builtin::Pwd
                 | Builtin::Type(_)
@@ -263,7 +264,6 @@ pub fn execute_pipeline(state: &mut ShellState, pipeline: &[Command], background
                 | Builtin::RegexMatch(..) => {
                     run_builtin(state, builtin, &mut buf, &mut err);
                 }
-                // These don't make sense in a pipeline — run them but discard output
                 _ => {
                     run_builtin(state, builtin, &mut buf, &mut err);
                 }
@@ -292,7 +292,6 @@ pub fn execute_pipeline(state: &mut ShellState, pipeline: &[Command], background
             } else if builtin_buffer.is_some() {
                 child.stdin(std::process::Stdio::piped());
             } else if cmd.heredoc_content.is_some() {
-                // NEW: Force the pipeline child to wait for our heredoc pipe!
                 child.stdin(std::process::Stdio::piped());
             }
 
@@ -309,14 +308,11 @@ pub fn execute_pipeline(state: &mut ShellState, pipeline: &[Command], background
             setup_child_signals(&mut child, cmd.merge_stderr);
             let mut spawned = child.spawn().expect("failed to spawn");
 
-            // Feed builtin output to child's stdin
             if let Some(buf) = builtin_buffer.take() {
                 if let Some(mut stdin) = spawned.stdin.take() {
                     stdin.write_all(&buf).unwrap();
                 }
-            }
-            // NEW: Feed heredoc output to child's stdin
-            else if let Some(content) = &cmd.heredoc_content {
+            } else if let Some(content) = &cmd.heredoc_content {
                 if let Some(mut stdin) = spawned.stdin.take() {
                     let _ = stdin.write_all(content.as_bytes());
                 }
@@ -395,7 +391,6 @@ fn attach_output_redirects(
 
 fn setup_child_signals(child: &mut std::process::Command, merge_stderr: bool) {
     unsafe {
-        // We use 'move' here so the closure takes ownership of the boolean
         child.pre_exec(move || {
             libc::setpgid(0, 0);
             libc::signal(libc::SIGINT, libc::SIG_DFL);
@@ -404,9 +399,7 @@ fn setup_child_signals(child: &mut std::process::Command, merge_stderr: bool) {
             libc::signal(libc::SIGTTIN, libc::SIG_DFL);
             libc::signal(libc::SIGTTOU, libc::SIG_DFL);
 
-            // NEW: The magic stream merge!
             if merge_stderr {
-                // Duplicate FD 1 (stdout) into FD 2 (stderr)
                 if libc::dup2(libc::STDOUT_FILENO, libc::STDERR_FILENO) < 0 {
                     eprintln!("rsh: failed to merge stderr into stdout");
                     libc::_exit(1);
@@ -437,7 +430,6 @@ fn wait_foreground(
         libc::tcsetpgrp(libc::STDIN_FILENO, libc::getpid());
     }
 
-    // Drop the Rust Child handle (we already waited via libc)
     drop(spawned);
 
     if libc::WIFSTOPPED(raw_status) {

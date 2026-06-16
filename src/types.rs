@@ -9,7 +9,6 @@ pub enum Builtin {
     Type(Vec<String>),
     Pwd,
     Cd(Option<String>),
-    Export(String, String),
     Alias(Vec<String>),
     Jobs,
     Fg(Option<usize>),
@@ -18,6 +17,9 @@ pub enum Builtin {
     Source(String),
     ReadJson(String),
     Test(Vec<String>),
+    Export(Vec<String>),
+    Unset(Vec<String>),
+    Hash(Vec<String>),
 }
 
 impl Builtin {
@@ -34,14 +36,9 @@ impl Builtin {
             "type" => Some(Builtin::Type(args.to_vec())),
             "cd" => Some(Builtin::Cd(args.get(0).cloned())),
             "pwd" => Some(Builtin::Pwd),
-            "export" => {
-                if let Some(arg) = args.first() {
-                    if let Some((key, value)) = arg.split_once('=') {
-                        return Some(Builtin::Export(key.to_string(), value.to_string()));
-                    }
-                }
-                None
-            }
+            "export" => Some(Builtin::Export(args.to_vec())),
+            "unset" => Some(Builtin::Unset(args.to_vec())),
+            "hash" => Some(Builtin::Hash(args.to_vec())),
             "[[" => {
                 // Expected: [[ text =~ pattern ]]
                 if args.len() >= 4

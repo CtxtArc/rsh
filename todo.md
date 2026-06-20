@@ -1,6 +1,6 @@
 # rsh Development Todo List
 
-
+just a test
 ## UX & Polish
 [x] proper escaping in tokenize
 [x] Implement TTY-aware output for ANSI color support (ls/grep compatibility)

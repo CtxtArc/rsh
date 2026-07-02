@@ -46,7 +46,7 @@ src/
 Ensure you have Rust and Cargo installed, then clone and build:
 
 ```bash
-git clone https://github.com/YourUsername/rsh
+git clone https://github.com/CtxtArc/rsh
 cd rsh
 cargo install --path .
 
@@ -81,7 +81,3 @@ rsh -c 'for X in 1 2 3 ; do echo $((X * 10)) ; done'
 ## Why rsh?
 
 `rsh` started as an exercise in systems programming and grew into a daily-driver shell. While tools like `bash` and `zsh` are incredibly powerful, they often rely on spawning external binaries (`grep`, `jq`, `find`) for common data tasks. By bringing structured data parsing, type-checking, and fuzzy path resolution natively into the shell, `rsh` aims to provide a faster, more modern command-line experience out of the box.
-
----
-
-How does that look? It highlights exactly why someone would want to write a script in `rsh` instead of Bash.
